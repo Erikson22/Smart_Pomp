@@ -1,0 +1,1211 @@
+je veux faire une application mobile pour notre projet de fin d'etude (mémoire) , par le logiciel Android Studio avec le frame work flutter  et la base de donnée Firebase, d'abord je te donne se que je veux exacte dans cette application mobile : 
+ - commande à distance de la pompe : marche  arret  ,et  avec temps (exemple : marche 1heure puis s'arret , ou bien s'arret apès 30 minutes) avec l'affichage de l'état de pompe 
+ - afficher  les coordonnées d'entrées ( tension, courant, puissance ) et les coordonnées de sorties ( tension, courant, fréquence et  puissance ) 
+- modifier la fréquence  
+- afficher les erreurs qu'ils s'affichent sur l'afficheur du variateur en cas de problème , leurs causes et les solutions pour les corriger 
+ - modifier les paramètres du variateur ( je te donne pour sa le manuelle du variateur veichi ) 
+- bouton pour faire la mis à jour du variateur en cas que le variateur se codé (d'aprés le manuelle aussi )
+ - afficher la localisation pas juste les coordonnées je veux aussi la position dans google maps ou lien qui s'amène au localisation sur google maps 
+ - afficher l' ape de SIM à utiliser ( orange , ooredoo , télécom) 
+- afficher les historiques de consommation par jour  (des graphiques )  
+ (pour le moment je n'ajoute pas des capteurs ) 
+- faires des notification alarmes pour les problèmes de courant ( d'après l'histogramme faire des combinaisons et détecter les mals fonctionnement , dans cette partie est ce que je peux ajouter l IA (intelligence artificielle) pour prophetiser les anomalies  avant qu'ils se passe (exemple sur intensité ) et pour d'autres choses innovantes .... 
+
+je te donnes les codes arduino pour que tu prend un idée.
+je te donne l'interface mobile  que je peux que tu le faire avec flutter 
+si tu compris le besoin commenser la bonne démarche un par un d'une facon pédagogique et normalisé.
+voici le code arduino : // ============================================================
+//   SMART PUMP - VEICHI SI23 + FIREBASE
+//   ESP32 + SIM808 + RS485 Modbus
+//   Version finale corrigée
+// ============================================================
+
+// ==================== BIBLIOTHÈQUES ====================
+#define TINY_GSM_MODEM_SIM808
+#include <TinyGsmClient.h>
+#include <HardwareSerial.h>
+#include <ModbusMaster.h>
+#include <TinyGPS++.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <time.h>
+
+// ==================== PINS ====================
+#define SIM808_TX_PIN  26
+#define SIM808_RX_PIN  27
+#define RS485_RX_PIN   16
+#define RS485_TX_PIN   17
+
+// ==================== OBJETS ====================
+HardwareSerial SerialSIM(1);
+TinyGsm        modem(SerialSIM);
+TinyGsmClient  gsmClient(modem);
+TinyGPSPlus    gps;
+ModbusMaster   variateur;
+
+// ==================== CONFIGURATION ====================
+// WiFi
+const char* WIFI_SSID     = "VOTRE_WIFI";
+const char* WIFI_PASSWORD = "VOTRE_MOT_DE_PASSE";
+
+// GPRS Ooredoo Tunisie
+const char* APN      = "internet.ooredoo.tn";
+const char* APN_USER = "";
+const char* APN_PASS = "";
+
+// Firebase
+const char* FIREBASE_HOST   = "smartpump-xxxxx-default-rtdb.firebaseio.com";
+const char* FIREBASE_SECRET = "VOTRE_DATABASE_SECRET";
+const String FIREBASE_URL   = "https://smartpump-xxxxx-default-rtdb.firebaseio.com";
+
+// Proxy (pour GPRS sans SSL)
+const char* PROXY_HOST = "192.168.1.100";
+const int   PROXY_PORT = 5000;
+
+// ==================== MODES DE CONNEXION ====================
+enum ModeConnexion {
+  CONNEXION_WIFI,
+  CONNEXION_GPRS,
+  CONNEXION_AUCUNE
+};
+ModeConnexion modeActuel = CONNEXION_AUCUNE;
+
+// ==================== MINUTERIE ====================
+enum TimerMode {
+  TIMER_NONE,
+  TIMER_RUN,
+  TIMER_STOP
+};
+
+struct Minuterie {
+  bool          active        = false;
+  TimerMode     mode          = TIMER_NONE;
+  unsigned long dureeMs       = 0;
+  unsigned long debutMs       = 0;
+};
+Minuterie minuterie;
+
+// ==================== SEUILS DE PROTECTION ====================
+float seuilVeille      = 0;
+float seuilReveil      = 0;
+float seuilBasseFreq   = 0;
+float seuilMarcheSec   = 0;
+float seuilSurintens   = 0;
+float seuilPuissMin    = 0;
+
+// ==================== VARIABLES ÉTAT ====================
+float  consigneFrequence    = 20.0;
+bool   moteurEnMarche       = false;
+String dernierAvertissement = "";
+uint8_t dernierEtatDefaut   = 0;
+
+// Dernières mesures (pour historique)
+float derniereTensPanneaux  = 0;
+float derniereCourSortie    = 0;
+float dernierePuisSortie    = 0;
+float derniereFreqSortie    = 0;
+float derniereTensSortie    = 0;
+
+// ==================== TIMING ====================
+unsigned long dernierEnvoiMesures    = 0;
+unsigned long dernierLectureCmd      = 0;
+unsigned long dernierEnvoiGPS        = 0;
+unsigned long dernierVerifConnexion  = 0;
+unsigned long dernierCheckDefaut     = 0;
+unsigned long dernierAffichage       = 0;
+
+// ==================== ERREURS VARIATEUR ====================
+struct ErreurInfo {
+  String code;
+  String description;
+  String cause;
+  String solution;
+};
+
+ErreurInfo erreurs[] = {
+  {"E.LU2", "Sous-tension en marche",
+   "Tension d'alimentation trop faible",
+   "Verifier tension DC entree, connexions panneaux, augmenter F14.11"},
+  {"E.OU1", "Surtension a l acceleration",
+   "Fluctuation de tension",
+   "Augmenter F00.14, verifier stabilite reseau"},
+  {"A.LPn", "Fonction Sommeil",
+   "Tension panneaux trop basse",
+   "Attendre meilleur ensoleillement, augmenter F14.11"},
+  {"A.LFr", "Basse frequence",
+   "Frequence trop basse",
+   "Augmenter F14.14, verifier la charge"},
+  {"A.LuT", "Marche a sec",
+   "Pompe sans eau",
+   "Verifier niveau eau, ajuster F14.17"},
+  {"A.OLd", "Surintensite",
+   "Courant trop eleve",
+   "Augmenter F14.20, verifier pompe"},
+  {"A.LPr", "Puissance minimale",
+   "Puissance trop faible",
+   "Verifier ensoleillement, augmenter F14.23"}
+};
+int nbErreurs = sizeof(erreurs) / sizeof(erreurs[0]);
+
+// ==================== PROTOTYPES ====================
+void connecter();
+bool connecterWiFi();
+bool connecterGPRS();
+void verifierConnexion();
+void synchroniserHeure();
+String getTimestamp();
+String getDateJour();
+String getHeure();
+bool envoyerDonnee(String chemin, String json);
+String lireDonnee(String chemin);
+int  envoyerViaGPRS(String methode, String chemin, String json);
+String lireViaGPRS(String chemin);
+void envoyerMesures();
+void lireCommandes();
+void envoyerGPS();
+void gererMinuterie();
+void demarrerMinuterie(int heures, int minutes, TimerMode mode);
+void arreterMinuterie();
+void demarrerMoteur();
+void arreterMoteur();
+void setFrequence(float freq);
+void lireSeuilsProtection();
+void diagnostiquerAvertissements(float tens, float freq,
+                                  float cour, float puis);
+void lireEtatDefaut();
+void sauvegarderHistoriqueHoraire(String date, String heure,
+                                   float tens, float cour,
+                                   float puis, float freq);
+void envoyerErreurFirebase(ErreurInfo err);
+void traiterCommandeSerial(String cmd);
+void afficherMenuAide();
+
+// ============================================================
+//                         SETUP
+// ============================================================
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  Serial.println("\n╔══════════════════════════════════════════╗");
+  Serial.println("║   SMART PUMP - VEICHI SI23 + Firebase   ║");
+  Serial.println("╚══════════════════════════════════════════╝");
+
+  // RS485 Modbus
+  Serial2.begin(9600, SERIAL_8N1, RS485_RX_PIN, RS485_TX_PIN);
+  variateur.begin(1, Serial2);
+  delay(500);
+
+  // SIM808
+  SerialSIM.begin(9600, SERIAL_8N1, SIM808_RX_PIN, SIM808_TX_PIN);
+  delay(1000);
+  initialiserSIM808();
+
+  // Connexion réseau
+  connecter();
+
+  // Synchroniser l'heure NTP
+  if (modeActuel == CONNEXION_WIFI) {
+    synchroniserHeure();
+  }
+
+  // Lire seuils de protection du variateur
+  lireSeuilsProtection();
+
+  // Afficher menu
+  afficherMenuAide();
+}
+
+// ============================================================
+//                    BOUCLE PRINCIPALE
+// ============================================================
+void loop() {
+  // Toujours lire les trames GPS
+  while (SerialSIM.available()) {
+    gps.encode(SerialSIM.read());
+  }
+
+  // Commandes série (console)
+  if (Serial.available()) {
+    String cmd = Serial.readString();
+    cmd.trim();
+    cmd.toUpperCase();
+    traiterCommandeSerial(cmd);
+  }
+
+  unsigned long maintenant = millis();
+
+  // 1. Vérifier connexion toutes les 60 secondes
+  if (maintenant - dernierVerifConnexion > 60000) {
+    verifierConnexion();
+    dernierVerifConnexion = maintenant;
+  }
+
+  // 2. Lire commandes Firebase toutes les 2 secondes
+  if (maintenant - dernierLectureCmd > 2000) {
+    lireCommandes();
+    dernierLectureCmd = maintenant;
+  }
+
+  // 3. Envoyer mesures toutes les 20 secondes
+  if (maintenant - dernierEnvoiMesures > 20000) {
+    envoyerMesures();
+    dernierEnvoiMesures = maintenant;
+  }
+
+  // 4. Envoyer GPS toutes les 30 secondes
+  if (maintenant - dernierEnvoiGPS > 30000) {
+    envoyerGPS();
+    dernierEnvoiGPS = maintenant;
+  }
+
+  // 5. Vérifier défauts variateur toutes les 200ms
+  if (maintenant - dernierCheckDefaut > 200) {
+    lireEtatDefaut();
+    dernierCheckDefaut = maintenant;
+  }
+
+  // 6. Gérer la minuterie
+  gererMinuterie();
+}
+
+// ============================================================
+//                  INITIALISATION SIM808
+// ============================================================
+void initialiserSIM808() {
+  Serial.println("\n📱 Initialisation SIM808...");
+  modem.restart();
+  delay(3000);
+
+  // Activer GPS
+  modem.sendAT("+CGNSPWR=1");
+  modem.waitResponse(1000);
+  modem.sendAT("+CGPSOUT=2");
+  modem.waitResponse(500);
+
+  Serial.println("✅ SIM808 initialisé");
+}
+
+// ============================================================
+//                    GESTION CONNEXION
+// ============================================================
+void connecter() {
+  if (connecterWiFi()) {
+    modeActuel = CONNEXION_WIFI;
+    return;
+  }
+  Serial.println("⚠️ WiFi indisponible, tentative GPRS...");
+  if (connecterGPRS()) {
+    modeActuel = CONNEXION_GPRS;
+    return;
+  }
+  modeActuel = CONNEXION_AUCUNE;
+  Serial.println("❌ Aucune connexion disponible");
+}
+
+bool connecterWiFi() {
+  Serial.print("📶 Connexion WiFi");
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  for (int i = 0; i < 20; i++) {
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\n✅ WiFi : " + WiFi.localIP().toString());
+      return true;
+    }
+    delay(500);
+    Serial.print(".");
+  }
+  WiFi.disconnect();
+  Serial.println("\n❌ WiFi échoué");
+  return false;
+}
+
+bool connecterGPRS() {
+  Serial.print("📡 Connexion GPRS");
+  if (!modem.waitForNetwork(30000)) {
+    Serial.println("\n❌ Réseau GSM indisponible");
+    return false;
+  }
+  if (!modem.gprsConnect(APN, APN_USER, APN_PASS)) {
+    Serial.println("\n❌ GPRS échoué");
+    return false;
+  }
+  Serial.println("\n✅ GPRS connecté");
+  return true;
+}
+
+void verifierConnexion() {
+  bool connecte = false;
+  if (modeActuel == CONNEXION_WIFI)
+    connecte = (WiFi.status() == WL_CONNECTED);
+  else if (modeActuel == CONNEXION_GPRS)
+    connecte = modem.isGprsConnected();
+
+  if (!connecte) {
+    Serial.println("⚠️ Connexion perdue, reconnexion...");
+    connecter();
+    if (modeActuel == CONNEXION_WIFI) synchroniserHeure();
+  }
+}
+
+// ============================================================
+//                    HEURE NTP
+// ============================================================
+void synchroniserHeure() {
+  configTime(3600, 0, "pool.ntp.org", "time.nist.gov");
+  Serial.print("⏰ Synchronisation NTP");
+  struct tm timeinfo;
+  for (int i = 0; i < 20; i++) {
+    if (getLocalTime(&timeinfo)) {
+      Serial.println("\n✅ Heure synchronisée : " + getTimestamp());
+      return;
+    }
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n⚠️ NTP échoué, utilisation millis()");
+}
+
+String getTimestamp() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo))
+    return String(millis() / 1000);
+  char buffer[20];
+  strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
+  return String(buffer);
+}
+
+String getDateJour() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) return "2024-01-01";
+  char buffer[11];
+  strftime(buffer, sizeof(buffer), "%Y-%m-%d", &timeinfo);
+  return String(buffer);
+}
+
+String getHeure() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) return "00";
+  char buffer[3];
+  strftime(buffer, sizeof(buffer), "%H", &timeinfo);
+  return String(buffer);
+}
+
+// ============================================================
+//              FONCTIONS HTTP FIREBASE
+// ============================================================
+bool envoyerDonnee(String chemin, String json) {
+  String url     = FIREBASE_URL + chemin + "?auth=" + FIREBASE_SECRET;
+  int    codeHTTP = 0;
+
+  if (modeActuel == CONNEXION_WIFI) {
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+    http.begin(client, url);
+    http.addHeader("Content-Type", "application/json");
+    codeHTTP = http.PUT(json);
+    http.end();
+  }
+  else if (modeActuel == CONNEXION_GPRS) {
+    codeHTTP = envoyerViaGPRS("PUT", chemin, json);
+  }
+
+  bool succes = (codeHTTP == 200 || codeHTTP == 204);
+  if (succes) Serial.println("✅ Firebase ← " + chemin);
+  else        Serial.println("❌ Firebase erreur : " + String(codeHTTP));
+  return succes;
+}
+
+String lireDonnee(String chemin) {
+  String url = FIREBASE_URL + chemin + "?auth=" + FIREBASE_SECRET;
+
+  if (modeActuel == CONNEXION_WIFI) {
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+    http.begin(client, url);
+    int code = http.GET();
+    if (code == 200) {
+      String rep = http.getString();
+      http.end();
+      return rep;
+    }
+    http.end();
+  }
+  else if (modeActuel == CONNEXION_GPRS) {
+    return lireViaGPRS(chemin);
+  }
+  return "";
+}
+
+int envoyerViaGPRS(String methode, String chemin, String json) {
+  String requete  = methode + " " + chemin + " HTTP/1.1\r\n";
+  requete += "Host: " + String(PROXY_HOST) + "\r\n";
+  requete += "Content-Type: application/json\r\n";
+  requete += "Content-Length: " + String(json.length()) + "\r\n";
+  requete += "Connection: close\r\n\r\n";
+  requete += json;
+
+  if (!gsmClient.connect(PROXY_HOST, PROXY_PORT)) return -1;
+  gsmClient.print(requete);
+
+  unsigned long debut = millis();
+  while (!gsmClient.available() && millis() - debut < 8000);
+
+  String rep = "";
+  while (gsmClient.available()) rep += (char)gsmClient.read();
+  gsmClient.stop();
+
+  if (rep.indexOf("HTTP/1.1 200") != -1) return 200;
+  if (rep.indexOf("HTTP/1.1 204") != -1) return 204;
+  return -1;
+}
+
+String lireViaGPRS(String chemin) {
+  String requete  = "GET " + chemin + " HTTP/1.1\r\n";
+  requete += "Host: " + String(PROXY_HOST) + "\r\n";
+  requete += "Connection: close\r\n\r\n";
+
+  if (!gsmClient.connect(PROXY_HOST, PROXY_PORT)) return "";
+  gsmClient.print(requete);
+
+  unsigned long debut = millis();
+  while (!gsmClient.available() && millis() - debut < 8000);
+
+  String rep = "";
+  while (gsmClient.available()) rep += (char)gsmClient.read();
+  gsmClient.stop();
+
+  int idx = rep.indexOf("\r\n\r\n");
+  if (idx != -1) return rep.substring(idx + 4);
+  return "";
+}
+
+// ============================================================
+//              ENVOYER LES MESURES VERS FIREBASE
+// ============================================================
+void envoyerMesures() {
+  uint8_t result;
+  float tensPanneaux = 0, tensBusDC  = 0;
+  float freqSortie   = 0, courSortie = 0;
+  float tensSortie   = 0, puisSortie = 0;
+  float courEntree   = 0, puissEntree = 0;
+
+  result = variateur.readHoldingRegisters(0x2103, 1);
+  if (result == variateur.ku8MBSuccess)
+    tensPanneaux = variateur.getResponseBuffer(0) / 10.0;
+  delay(60);
+
+  result = variateur.readHoldingRegisters(0x210B, 1);
+  if (result == variateur.ku8MBSuccess)
+    tensBusDC = variateur.getResponseBuffer(0) / 10.0;
+  delay(60);
+
+  result = variateur.readHoldingRegisters(0x2101, 1);
+  if (result == variateur.ku8MBSuccess)
+    freqSortie = variateur.getResponseBuffer(0) / 100.0;
+  delay(60);
+
+  result = variateur.readHoldingRegisters(0x2102, 1);
+  if (result == variateur.ku8MBSuccess)
+    courSortie = variateur.getResponseBuffer(0) / 10.0;
+  delay(60);
+
+  result = variateur.readHoldingRegisters(0x2104, 1);
+  if (result == variateur.ku8MBSuccess)
+    tensSortie = variateur.getResponseBuffer(0) / 10.0;
+
+  if (moteurEnMarche && tensSortie > 0 && courSortie > 0) {
+    puisSortie  = (tensSortie * courSortie * 1.732 * 0.85) / 1000.0;
+    if (tensPanneaux > 0) {
+      courEntree  = (puisSortie * 1000.0) / tensPanneaux;
+      puissEntree = (tensPanneaux * courEntree) / 1000.0;
+    }
+  }
+
+  // Sauvegarder pour historique
+  derniereTensPanneaux = tensPanneaux;
+  derniereCourSortie   = courSortie;
+  dernierePuisSortie   = puisSortie;
+  derniereFreqSortie   = freqSortie;
+  derniereTensSortie   = tensSortie;
+
+  // JSON mesures complètes
+  StaticJsonDocument<512> doc;
+  doc["tension_panneaux"]  = tensPanneaux;
+  doc["tension_bus_dc"]    = tensBusDC;
+  doc["sortie_tension"]    = tensSortie;
+  doc["sortie_courant"]    = courSortie;
+  doc["sortie_frequence"]  = freqSortie;
+  doc["sortie_puissance"]  = puisSortie;
+  doc["entree_courant"]    = courEntree;
+  doc["entree_puissance"]  = puissEntree;
+  doc["timestamp"]         = getTimestamp();
+  String jsonMesures;
+  serializeJson(doc, jsonMesures);
+  envoyerDonnee("/pompe/mesures.json", jsonMesures);
+
+  // JSON état pompe
+  StaticJsonDocument<256> docEtat;
+  docEtat["en_marche"]  = moteurEnMarche;
+  docEtat["frequence"]  = consigneFrequence;
+  docEtat["timestamp"]  = getTimestamp();
+  if (minuterie.active) {
+    unsigned long reste = minuterie.dureeMs - (millis() - minuterie.debutMs);
+    docEtat["timer_actif"]          = true;
+    docEtat["timer_reste_minutes"]  = reste / 60000;
+    docEtat["timer_mode"]           = (minuterie.mode == TIMER_RUN) ? "RUN" : "STOP";
+  } else {
+    docEtat["timer_actif"] = false;
+  }
+  String jsonEtat;
+  serializeJson(docEtat, jsonEtat);
+  envoyerDonnee("/pompe/etat.json", jsonEtat);
+
+  // Diagnostic avertissements
+  diagnostiquerAvertissements(tensPanneaux, freqSortie,
+                               courSortie, puisSortie);
+
+  // Historique horaire (1 écriture par heure max)
+  sauvegarderHistoriqueHoraire(getDateJour(), getHeure(),
+                                tensPanneaux, courSortie,
+                                puisSortie, freqSortie);
+
+  // Affichage console
+  Serial.println("\n┌──────────────────────────────────────┐");
+  Serial.print("│ MOTEUR : ");
+  Serial.println(moteurEnMarche ? "▶ EN MARCHE           │"
+                                : "⏹ ARRET               │");
+  Serial.println("├──────────────────────────────────────┤");
+  Serial.print("│ Freq sortie  : "); Serial.print(freqSortie, 1);
+  Serial.println(" Hz                  │");
+  Serial.print("│ Tens sortie  : "); Serial.print(tensSortie, 1);
+  Serial.println(" V                   │");
+  Serial.print("│ Cour sortie  : "); Serial.print(courSortie, 1);
+  Serial.println(" A                   │");
+  Serial.print("│ Puis sortie  : "); Serial.print(puisSortie, 2);
+  Serial.println(" kW                  │");
+  Serial.println("├──────────────────────────────────────┤");
+  Serial.print("│ Tens panneaux: "); Serial.print(tensPanneaux, 1);
+  Serial.println(" V                   │");
+  Serial.print("│ Bus DC       : "); Serial.print(tensBusDC, 1);
+  Serial.println(" V                   │");
+  Serial.println("└──────────────────────────────────────┘");
+}
+
+// ============================================================
+//         SAUVEGARDER HISTORIQUE (1 nœud par heure)
+// ============================================================
+void sauvegarderHistoriqueHoraire(String date, String heure,
+                                   float tens, float cour,
+                                   float puis, float freq) {
+  static String derniereHeure = "";
+  if (heure == derniereHeure) return;
+  derniereHeure = heure;
+
+  StaticJsonDocument<256> doc;
+  doc["tension_panneaux"] = tens;
+  doc["courant_sortie"]   = cour;
+  doc["puissance_sortie"] = puis;
+  doc["frequence"]        = freq;
+  doc["en_marche"]        = moteurEnMarche;
+  doc["heure"]            = heure;
+
+  String json;
+  serializeJson(doc, json);
+
+  // Structure : /historique/2024-06-06/08.json
+  String chemin = "/historique/" + date + "/" + heure + ".json";
+  envoyerDonnee(chemin, json);
+  Serial.println("📊 Historique sauvegardé : " + chemin);
+}
+
+// ============================================================
+//            LIRE LES COMMANDES DEPUIS FIREBASE
+// ============================================================
+void lireCommandes() {
+  String reponse = lireDonnee("/pompe/commande.json");
+  if (reponse == "" || reponse == "null") return;
+
+  StaticJsonDocument<512> doc;
+  if (deserializeJson(doc, reponse)) return;
+
+  // Ignorer si pas en attente
+  String statut = doc["statut"] | "IDLE";
+  if (statut != "EN_ATTENTE") return;
+
+  // Accuser réception immédiatement
+  envoyerDonnee("/pompe/commande/statut.json", "\"RECU\"");
+
+  String ordre  = doc["ordre"] | "IDLE";
+  bool   succes = false;
+
+  // --- Commande MARCHE ---
+  if (ordre == "START") {
+    if (!moteurEnMarche) {
+      demarrerMoteur();
+      succes = moteurEnMarche;
+    } else {
+      succes = true; // Déjà en marche
+    }
+  }
+
+  // --- Commande ARRET ---
+  else if (ordre == "STOP") {
+    arreterMinuterie();
+    if (moteurEnMarche) {
+      arreterMoteur();
+      succes = !moteurEnMarche;
+    } else {
+      succes = true;
+    }
+  }
+
+  // --- Commande FRÉQUENCE ---
+  else if (ordre == "SET_FREQ") {
+    float f = doc["frequence"] | consigneFrequence;
+    setFrequence(f);
+    succes = true;
+  }
+
+  // --- Commande TIMER MARCHE ---
+  // Ex: pompe tourne X minutes puis s'arrête
+  else if (ordre == "TIMER_RUN") {
+    int h = doc["timer_heures"]  | 0;
+    int m = doc["timer_minutes"] | 0;
+    if (h >= 0 && m >= 0 && (h + m) > 0) {
+      demarrerMinuterie(h, m, TIMER_RUN);
+      succes = true;
+    }
+  }
+
+  // --- Commande TIMER ARRET ---
+  // Ex: pompe s'arrête X minutes (sans redémarrage)
+  else if (ordre == "TIMER_STOP") {
+    int h = doc["timer_heures"]  | 0;
+    int m = doc["timer_minutes"] | 0;
+    if (h >= 0 && m >= 0 && (h + m) > 0) {
+      demarrerMinuterie(h, m, TIMER_STOP);
+      succes = true;
+    }
+  }
+
+  // --- Annuler minuterie ---
+  else if (ordre == "TIMER_OFF") {
+    arreterMinuterie();
+    succes = true;
+  }
+
+  // --- Modifier paramètre variateur ---
+  else if (ordre == "SET_PARAM") {
+    String param = doc["parametre"] | "";
+    int    valeur = doc["valeur"]   | -1;
+    if (param != "" && valeur >= 0) {
+      succes = ecrireParametreFirebase(param, valeur);
+    }
+  }
+
+  // --- Mise à jour / Reset variateur ---
+  else if (ordre == "RESET_VARIATEUR") {
+    // F00.19 = 1 : restaurer paramètres usine sans moteur
+    variateur.writeSingleRegister((0 << 8) | 19, 1);
+    succes = true;
+    Serial.println("🔄 Reset variateur envoyé");
+  }
+
+  // Confirmer exécution ou erreur vers Firebase
+  String resultat = succes ? "\"EXECUTE\"" : "\"ERREUR\"";
+  envoyerDonnee("/pompe/commande/statut.json", resultat);
+
+  // Remettre ordre à IDLE
+  envoyerDonnee("/pompe/commande/ordre.json", "\"IDLE\"");
+}
+
+// ============================================================
+//                     ENVOYER GPS
+// ============================================================
+void envoyerGPS() {
+  StaticJsonDocument<256> doc;
+
+  if (gps.location.isValid()) {
+    doc["latitude"]  = gps.location.lat();
+    doc["longitude"] = gps.location.lng();
+    doc["valide"]    = true;
+    // Lien Google Maps direct
+    String lien = "https://maps.google.com/?q=";
+    lien += String(gps.location.lat(), 6);
+    lien += ",";
+    lien += String(gps.location.lng(), 6);
+    doc["google_maps"] = lien;
+  } else {
+    doc["latitude"]    = 0.0;
+    doc["longitude"]   = 0.0;
+    doc["valide"]      = false;
+    doc["google_maps"] = "";
+  }
+
+  if (gps.altitude.isValid())
+    doc["altitude"]   = gps.altitude.meters();
+  if (gps.speed.isValid())
+    doc["vitesse"]    = gps.speed.kmph();
+  if (gps.satellites.isValid())
+    doc["satellites"] = gps.satellites.value();
+  if (gps.date.isValid() && gps.time.isValid()) {
+    doc["heure_gps"]  = getTimestamp();
+  }
+
+  // Détecter opérateur SIM
+  String operateur = modem.getOperator();
+  if (operateur.indexOf("Ooredoo") != -1 ||
+      operateur.indexOf("605 03") != -1)
+    doc["operateur"] = "Ooredoo";
+  else if (operateur.indexOf("Orange") != -1 ||
+           operateur.indexOf("605 01") != -1)
+    doc["operateur"] = "Orange";
+  else if (operateur.indexOf("Telecom") != -1 ||
+           operateur.indexOf("605 02") != -1)
+    doc["operateur"] = "Tunisie Telecom";
+  else
+    doc["operateur"] = operateur;
+
+  doc["gprs_connecte"] = (modeActuel == CONNEXION_GPRS);
+  doc["timestamp"]     = getTimestamp();
+
+  String json;
+  serializeJson(doc, json);
+  envoyerDonnee("/pompe/gps.json", json);
+}
+
+// ============================================================
+//                     MINUTERIE
+// ============================================================
+void demarrerMinuterie(int heures, int minutes, TimerMode mode) {
+  if (heures < 0 || heures > 23 || minutes < 0 || minutes > 59) {
+    Serial.println("❌ Temps invalide");
+    return;
+  }
+
+  if (minuterie.active) arreterMinuterie();
+
+  minuterie.active  = true;
+  minuterie.mode    = mode;
+  minuterie.dureeMs = ((unsigned long)heures * 3600000UL) +
+                      ((unsigned long)minutes * 60000UL);
+  minuterie.debutMs = millis();
+
+  if (mode == TIMER_RUN) {
+    demarrerMoteur();
+    Serial.print("⏲️ Minuterie MARCHE : ");
+  } else {
+    arreterMoteur();
+    Serial.print("⏲️ Minuterie ARRET : ");
+  }
+  Serial.print(heures); Serial.print("h");
+  Serial.print(minutes); Serial.println("min");
+
+  // Notifier Firebase
+  StaticJsonDocument<128> doc;
+  doc["actif"]          = true;
+  doc["mode"]           = (mode == TIMER_RUN) ? "RUN" : "STOP";
+  doc["duree_minutes"]  = (heures * 60) + minutes;
+  String json;
+  serializeJson(doc, json);
+  envoyerDonnee("/pompe/commande/timer.json", json);
+}
+
+void arreterMinuterie() {
+  if (!minuterie.active) return;
+  minuterie.active = false;
+  Serial.println("⏲️ Minuterie désactivée");
+
+  StaticJsonDocument<64> doc;
+  doc["actif"] = false;
+  doc["mode"]  = "NONE";
+  String json;
+  serializeJson(doc, json);
+  envoyerDonnee("/pompe/commande/timer.json", json);
+}
+
+void gererMinuterie() {
+  if (!minuterie.active) return;
+  if (millis() - minuterie.debutMs < minuterie.dureeMs) return;
+
+  minuterie.active = false;
+  Serial.println("\n⏰ FIN MINUTERIE");
+
+  if (minuterie.mode == TIMER_RUN) {
+    arreterMoteur();
+    Serial.println("   → Pompe arrêtée automatiquement");
+  } else {
+    Serial.println("   → Fin période arrêt, pompe reste arrêtée");
+    Serial.println("   → Utilisez START pour redémarrer");
+  }
+
+  // Notifier Firebase
+  StaticJsonDocument<64> doc;
+  doc["actif"] = false;
+  doc["mode"]  = "NONE";
+  String json;
+  serializeJson(doc, json);
+  envoyerDonnee("/pompe/commande/timer.json", json);
+  envoyerDonnee("/pompe/commande/statut.json", "\"EXECUTE\"");
+}
+
+// ============================================================
+//                   COMMANDES MOTEUR
+// ============================================================
+void demarrerMoteur() {
+  setFrequence(consigneFrequence);
+  delay(100);
+  uint8_t result = variateur.writeSingleRegister(0x2001, 0x0001);
+  if (result == variateur.ku8MBSuccess) {
+    moteurEnMarche = true;
+    Serial.println("▶️ Moteur démarré");
+  } else {
+    Serial.println("❌ Erreur démarrage moteur");
+  }
+}
+
+void arreterMoteur() {
+  uint8_t result = variateur.writeSingleRegister(0x2001, 0x0005);
+  if (result == variateur.ku8MBSuccess) {
+    moteurEnMarche = false;
+    Serial.println("⏹️ Moteur arrêté");
+  } else {
+    Serial.println("❌ Erreur arrêt moteur");
+  }
+}
+
+void setFrequence(float freq) {
+  consigneFrequence     = constrain(freq, 0, 300);
+  uint16_t valeur       = (uint16_t)(consigneFrequence * 100);
+  uint8_t  result       = variateur.writeSingleRegister(0x2000, valeur);
+  if (result == variateur.ku8MBSuccess) {
+    Serial.print("📡 Fréquence : ");
+    Serial.print(consigneFrequence);
+    Serial.println(" Hz");
+  }
+}
+
+// ============================================================
+//              LIRE SEUILS DE PROTECTION
+// ============================================================
+void lireSeuilsProtection() {
+  uint8_t result;
+  result = variateur.readHoldingRegisters((14 << 8) | 11, 1);
+  if (result == variateur.ku8MBSuccess)
+    seuilVeille = variateur.getResponseBuffer(0);
+
+  result = variateur.readHoldingRegisters((14 << 8) | 12, 1);
+  if (result == variateur.ku8MBSuccess)
+    seuilReveil = variateur.getResponseBuffer(0);
+
+  result = variateur.readHoldingRegisters((14 << 8) | 14, 1);
+  if (result == variateur.ku8MBSuccess)
+    seuilBasseFreq = variateur.getResponseBuffer(0) / 100.0;
+
+  result = variateur.readHoldingRegisters((14 << 8) | 17, 1);
+  if (result == variateur.ku8MBSuccess)
+    seuilMarcheSec = variateur.getResponseBuffer(0) / 10.0;
+
+  result = variateur.readHoldingRegisters((14 << 8) | 20, 1);
+  if (result == variateur.ku8MBSuccess)
+    seuilSurintens = variateur.getResponseBuffer(0) / 10.0;
+
+  result = variateur.readHoldingRegisters((14 << 8) | 23, 1);
+  if (result == variateur.ku8MBSuccess)
+    seuilPuissMin = variateur.getResponseBuffer(0) / 100.0;
+
+  // Envoyer seuils vers Firebase (pour affichage dans l'app)
+  StaticJsonDocument<256> doc;
+  doc["veille"]      = seuilVeille;
+  doc["reveil"]      = seuilReveil;
+  doc["basse_freq"]  = seuilBasseFreq;
+  doc["marche_sec"]  = seuilMarcheSec;
+  doc["surintensite"]= seuilSurintens;
+  doc["puiss_min"]   = seuilPuissMin;
+  String json;
+  serializeJson(doc, json);
+  envoyerDonnee("/pompe/seuils.json", json);
+}
+
+// ============================================================
+//              DIAGNOSTIC AVERTISSEMENTS
+// ============================================================
+void diagnostiquerAvertissements(float tens, float freq,
+                                  float cour, float puis) {
+  String avert = "";
+
+  if (seuilVeille > 0 && tens < seuilVeille && tens > 0)
+    avert = "A.LPn";
+  else if (seuilBasseFreq > 0 && moteurEnMarche &&
+           freq < seuilBasseFreq && freq > 0)
+    avert = "A.LFr";
+  else if (seuilMarcheSec > 0 && moteurEnMarche &&
+           cour < seuilMarcheSec && cour > 0)
+    avert = "A.LuT";
+  else if (seuilSurintens > 0 && moteurEnMarche &&
+           cour > seuilSurintens)
+    avert = "A.OLd";
+  else if (seuilPuissMin > 0 && moteurEnMarche &&
+           puis < seuilPuissMin && puis > 0)
+    avert = "A.LPr";
+
+  if (avert != "" && avert != dernierAvertissement) {
+    dernierAvertissement = avert;
+    Serial.println("⚠️ Avertissement : " + avert);
+
+    // Trouver l'erreur et envoyer vers Firebase
+    for (int i = 0; i < nbErreurs; i++) {
+      if (erreurs[i].code == avert) {
+        envoyerErreurFirebase(erreurs[i]);
+        break;
+      }
+    }
+  } else if (avert == "" && dernierAvertissement != "") {
+    dernierAvertissement = "";
+    // Effacer alarme Firebase
+    StaticJsonDocument<128> doc;
+    doc["active"]      = false;
+    doc["code"]        = "";
+    doc["description"] = "";
+    doc["cause"]       = "";
+    doc["solution"]    = "";
+    doc["timestamp"]   = getTimestamp();
+    String json;
+    serializeJson(doc, json);
+    envoyerDonnee("/pompe/alarme.json", json);
+  }
+}
+
+// ============================================================
+//              DÉTECTER DÉFAUTS VARIATEUR
+// ============================================================
+void lireEtatDefaut() {
+  uint8_t result = variateur.readHoldingRegisters(0x2100, 1);
+  if (result != variateur.ku8MBSuccess) return;
+
+  uint16_t etat    = variateur.getResponseBuffer(0);
+  bool     defaut  = (etat & 0x0001);
+
+  if (defaut && dernierEtatDefaut == 0) {
+    dernierEtatDefaut = 1;
+    Serial.println("\n🔴 DÉFAUT DÉTECTÉ");
+
+    // Lire code erreur
+    uint16_t adresse = ((9 << 8) | 18) | 0x1000;
+    result = variateur.readHoldingRegisters(adresse, 1);
+    if (result != variateur.ku8MBSuccess)
+      result = variateur.readHoldingRegisters((9 << 8) | 18, 1);
+
+    if (result == variateur.ku8MBSuccess) {
+      uint16_t codeErreur = variateur.getResponseBuffer(0);
+      Serial.print("   Code : 0x");
+      Serial.println(codeErreur, HEX);
+
+      // Mapper le code vers ErreurInfo
+      ErreurInfo* err = nullptr;
+      if (codeErreur == 1)                    err = &erreurs[0];
+      else if (codeErreur == 2)               err = &erreurs[1];
+      else if (codeErreur >= 10 && codeErreur <= 15) err = &erreurs[2];
+      else if (codeErreur >= 16 && codeErreur <= 20) err = &erreurs[4];
+
+      if (err != nullptr) {
+        envoyerErreurFirebase(*err);
+      } else {
+        // Code inconnu
+        StaticJsonDocument<256> doc;
+        doc["active"]      = true;
+        doc["code"]        = "0x" + String(codeErreur, HEX);
+        doc["description"] = "Code non repertorie";
+        doc["cause"]       = "Voir manuel Veichi SI23";
+        doc["solution"]    = "Voir manuel Veichi SI23";
+        doc["timestamp"]   = getTimestamp();
+        String json;
+        serializeJson(doc, json);
+        envoyerDonnee("/pompe/alarme.json", json);
+      }
+    }
+  }
+  else if (!defaut && dernierEtatDefaut == 1) {
+    dernierEtatDefaut = 0;
+    Serial.println("✅ Défaut résolu");
+
+    StaticJsonDocument<128> doc;
+    doc["active"]      = false;
+    doc["code"]        = "";
+    doc["description"] = "";
+    doc["timestamp"]   = getTimestamp();
+    String json;
+    serializeJson(doc, json);
+    envoyerDonnee("/pompe/alarme.json", json);
+  }
+}
+
+// ============================================================
+//              ENVOYER ERREUR VERS FIREBASE
+// ============================================================
+void envoyerErreurFirebase(ErreurInfo err) {
+  StaticJsonDocument<512> doc;
+  doc["active"]      = true;
+  doc["code"]        = err.code;
+  doc["description"] = err.description;
+  doc["cause"]       = err.cause;
+  doc["solution"]    = err.solution;
+  doc["timestamp"]   = getTimestamp();
+  String json;
+  serializeJson(doc, json);
+  envoyerDonnee("/pompe/alarme.json", json);
+
+  // Aussi sauvegarder dans historique alarmes
+  String chemin = "/alarmes/" + getDateJour() +
+                  "/" + getTimestamp() + ".json";
+  envoyerDonnee(chemin, json);
+}
+
+// ============================================================
+//         ÉCRIRE PARAMÈTRE VARIATEUR (depuis Firebase)
+// ============================================================
+bool ecrireParametreFirebase(String nomParam, int valeur) {
+  if (!nomParam.startsWith("F")) return false;
+  int pointIndex = nomParam.indexOf('.');
+  if (pointIndex == -1) return false;
+
+  int groupe = nomParam.substring(1, pointIndex).toInt();
+  int num    = nomParam.substring(pointIndex + 1).toInt();
+
+  uint16_t adresseRAM   = (groupe << 8) | num;
+  uint16_t adresseEEPROM = adresseRAM | 0x1000;
+
+  uint8_t result = variateur.writeSingleRegister(adresseRAM,
+                                                  (uint16_t)valeur);
+  if (result == variateur.ku8MBSuccess) {
+    delay(100);
+    variateur.writeSingleRegister(adresseEEPROM, (uint16_t)valeur);
+    Serial.println("✅ Paramètre " + nomParam + " = " + String(valeur));
+    return true;
+  }
+  Serial.println("❌ Erreur écriture " + nomParam);
+  return false;
+}
+
+// ============================================================
+//              COMMANDES SÉRIE (console Arduino)
+// ============================================================
+void traiterCommandeSerial(String cmd) {
+  if (cmd == "START") {
+    arreterMinuterie();
+    demarrerMoteur();
+  }
+  else if (cmd == "STOP") {
+    arreterMinuterie();
+    arreterMoteur();
+  }
+  else if (cmd.startsWith("F=")) {
+    float f = cmd.substring(2).toFloat();
+    setFrequence(f);
+  }
+  else if (cmd == "READ") {
+    envoyerMesures();
+  }
+  else if (cmd == "GPS") {
+    envoyerGPS();
+  }
+  else if (cmd == "STATUS") {
+    Serial.println("\n--- ÉTAT SYSTÈME ---");
+    Serial.print("Moteur   : "); Serial.println(moteurEnMarche ? "MARCHE" : "ARRET");
+    Serial.print("Fréquence: "); Serial.print(consigneFrequence); Serial.println(" Hz");
+    Serial.print("Connexion: ");
+    if      (modeActuel == CONNEXION_WIFI)  Serial.println("WiFi");
+    else if (modeActuel == CONNEXION_GPRS)  Serial.println("GPRS");
+    else                                    Serial.println("Aucune");
+    Serial.print("Minuterie: ");
+    if (minuterie.active) {
+      unsigned long reste = minuterie.dureeMs -
+                            (millis() - minuterie.debutMs);
+      Serial.print("ACTIVE - ");
+      Serial.print(reste / 60000);
+      Serial.println(" min restantes");
+    } else {
+      Serial.println("INACTIVE");
+    }
+  }
+  else if (cmd.startsWith("TIMER ")) {
+    String args = cmd.substring(6);
+    if (args == "OFF") {
+      arreterMinuterie();
+    } else {
+      int espIdx = args.indexOf(' ');
+      if (espIdx != -1) {
+        String temps  = args.substring(0, espIdx);
+        String action = args.substring(espIdx + 1);
+        int colonIdx  = temps.indexOf(':');
+        if (colonIdx != -1) {
+          int h = temps.substring(0, colonIdx).toInt();
+          int m = temps.substring(colonIdx + 1).toInt();
+          if (action == "START") demarrerMinuterie(h, m, TIMER_RUN);
+          else if (action == "STOP") demarrerMinuterie(h, m, TIMER_STOP);
+        }
+      }
+    }
+  }
+  else if (cmd.startsWith("R ")) {
+    String param = cmd.substring(2);
+    lireParametreConsole(param);
+  }
+  else if (cmd.startsWith("W ")) {
+    String args    = cmd.substring(2);
+    int    egalIdx = args.indexOf('=');
+    if (egalIdx != -1) {
+      String param  = args.substring(0, egalIdx);
+      int    valeur = args.substring(egalIdx + 1).toInt();
+      ecrireParametreFirebase(param, valeur);
+    }
+  }
+  else if (cmd == "HELP" || cmd == "H") {
+    afficherMenuAide();
+  }
+  else if (cmd.length() > 0) {
+    Serial.println("❌ Commande inconnue. Tapez HELP");
+  }
+}
+
+void lireParametreConsole(String nomParam) {
+  if (!nomParam.startsWith("F")) { Serial.println("❌ Format: R Fx.yy"); return; }
+  int pointIndex = nomParam.indexOf('.');
+  if (pointIndex == -1) { Serial.println("❌ Format: R Fx.yy"); return; }
+  int groupe = nomParam.substring(1, pointIndex).toInt();
+  int num    = nomParam.substring(pointIndex + 1).toInt();
+  uint16_t adresse = ((groupe << 8) | num) | 0x1000;
+  uint8_t  result  = variateur.readHoldingRegisters(adresse, 1);
+  if (result == variateur.ku8MBSuccess) {
+    Serial.print("📖 "); Serial.print(nomParam);
+    Serial.print(" = "); Serial.println(variateur.getResponseBuffer(0));
+  } else {
+    Serial.println("❌ Erreur lecture " + nomParam);
+  }
+}
+
+// ============================================================
+//                     MENU AIDE
+// ============================================================
+void afficherMenuAide() {
+  Serial.println("\n╔══════════════════════════════════════════════════╗");
+  Serial.println("║              LISTE DES COMMANDES                 ║");
+  Serial.println("╠══════════════════════════════════════════════════╣");
+  Serial.println("║ START              - Demarrer le moteur          ║");
+  Serial.println("║ STOP               - Arreter le moteur           ║");
+  Serial.println("║ F=XX               - Regler frequence (Hz)       ║");
+  Serial.println("║ TIMER HH:MM START  - Marche puis arret auto      ║");
+  Serial.println("║ TIMER HH:MM STOP   - Arret sans redemarrage      ║");
+  Serial.println("║ TIMER OFF          - Annuler minuterie           ║");
+  Serial.println("║ READ               - Lire et envoyer mesures     ║");
+  Serial.println("║ GPS                - Envoyer position GPS        ║");
+  Serial.println("║ STATUS             - Etat du systeme             ║");
+  Serial.println("║ R Fxx.yy           - Lire parametre variateur    ║");
+  Serial.println("║ W Fxx.yy=Z         - Ecrire parametre variateur  ║");
+  Serial.println("║ HELP               - Afficher ce menu            ║");
+  Serial.println("╚══════════════════════════════════════════════════╝");
+}"
