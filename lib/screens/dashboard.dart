@@ -1,7 +1,11 @@
 ﻿import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../models/etat.dart';
 import '../services/pompe_service.dart';
+import '../widgets/etat_pompe_card.dart';
+import 'timer_dialog.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -37,7 +41,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           Stack(children: [
             IconButton(
               icon: const Icon(Icons.notifications_outlined, color: Colors.black87),
-              onPressed: () {},
+              onPressed: () => context.go('/alarmes'),
             ),
             if (alarmeActive)
               Positioned(right: 8, top: 8,
@@ -59,6 +63,31 @@ class _DashboardScreenState extends State<DashboardScreen> {
             // --- Bannière état pompe ---
             _banniereEtat(enMarche, alarmeActive, alarme),
             const SizedBox(height: 16),
+
+            // --- Contrôles pompe ---
+            EtatPompeCard(
+              etat: EtatPompe(
+                enMarche: enMarche,
+                frequence: pompe.frequence,
+                timerActif: pompe.etat['timer_actif'] ?? false,
+                timerResteMinutes: pompe.etat['timer_reste_minutes'] ?? 0,
+                timerMode: pompe.etat['timer_mode'] ?? 'NONE',
+                timestamp: pompe.etat['timestamp'] ?? '',
+              ),
+              onMarche: () => pompe.demarrer(),
+              onArret: () => pompe.arreter(),
+              onFrequenceChange: (val) => pompe.setFrequence(val),
+            ),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                onPressed: () => showTimerDialog(context),
+                icon: const Icon(Icons.timer_outlined),
+                label: const Text('Minuterie'),
+              ),
+            ),
+            const SizedBox(height: 8),
 
             // --- 4 cartes mesures sortie ---
             GridView.count(

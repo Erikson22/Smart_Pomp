@@ -1,5 +1,6 @@
-﻿import 'package:flutter/material.dart';
-import '../services/firebase_service.dart';
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import '../services/pompe_service.dart';
 
 void showTimerDialog(BuildContext context) {
   int heures = 0;
@@ -37,15 +38,24 @@ void showTimerDialog(BuildContext context) {
           ]),
           actions: [
             TextButton(
-              onPressed: () { FirebaseService().startTimerRun(heures, minutes); Navigator.pop(ctx); },
+              onPressed: () {
+                context.read<PompeService>().startTimerRun(heures, minutes);
+                Navigator.pop(ctx);
+              },
               child: const Text('MARCHE puis arret'),
             ),
             TextButton(
-              onPressed: () { FirebaseService().startTimerStop(heures, minutes); Navigator.pop(ctx); },
+              onPressed: () {
+                context.read<PompeService>().startTimerStop(heures, minutes);
+                Navigator.pop(ctx);
+              },
               child: const Text('ARRET temporaire'),
             ),
             TextButton(
-              onPressed: () { FirebaseService().annulerTimer(); Navigator.pop(ctx); },
+              onPressed: () {
+                context.read<PompeService>().annulerTimer();
+                Navigator.pop(ctx);
+              },
               child: const Text('Annuler'),
             ),
           ],

@@ -1,7 +1,8 @@
+import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:fl_chart/fl_chart.dart';
-import '../services/firebase_service.dart';
+import 'package:provider/provider.dart';
+import '../services/pompe_service.dart';
 
 class GraphiquesScreen extends StatefulWidget {
   const GraphiquesScreen({super.key});
@@ -14,7 +15,6 @@ class _GraphiquesScreenState extends State<GraphiquesScreen> {
   DateTime _selectedDate = DateTime.now();
   Map<String, dynamic> _data = {};
   bool _loading = false;
-  final firebase = FirebaseService();
 
   @override
   void initState() {
@@ -25,7 +25,8 @@ class _GraphiquesScreenState extends State<GraphiquesScreen> {
   Future<void> _loadData() async {
     setState(() => _loading = true);
     final dateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
-    final data = await firebase.getHistoriqueJour(dateStr);
+    final data =
+        await context.read<PompeService>().getHistoriqueJour(dateStr);
     setState(() {
       _data = data;
       _loading = false;
@@ -33,10 +34,10 @@ class _GraphiquesScreenState extends State<GraphiquesScreen> {
   }
 
   List<FlSpot> _getSpots(String key) {
-    List<FlSpot> spots = [];
+    final spots = <FlSpot>[];
     _data.forEach((heure, values) {
-      int h = int.parse(heure);
-      double val = (values[key] ?? 0).toDouble();
+      final h = int.parse(heure);
+      final val = (values[key] ?? 0).toDouble();
       spots.add(FlSpot(h.toDouble(), val));
     });
     spots.sort((a, b) => a.x.compareTo(b.x));
@@ -69,93 +70,74 @@ class _GraphiquesScreenState extends State<GraphiquesScreen> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _data.isEmpty
-          ? const Center(child: Text('Aucune donnée pour ce jour'))
-          : SingleChildScrollView(
+              ? const Center(child: Text('Aucune donnée pour ce jour'))
+              : SingleChildScrollView(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    children: [
+                      _graphiqueCard(
+                        titre: 'Puissance (kW)',
+                        spots: _getSpots('puissance_sortie'),
+                        couleur: Colors.blue,
+                        unite: 'kW',
+                      ),
+                      const SizedBox(height: 16),
+                      _graphiqueCard(
+                        titre: 'Courant (A)',
+                        spots: _getSpots('courant_sortie'),
+                        couleur: Colors.red,
+                        unite: 'A',
+                      ),
+                    ],
+                  ),
+                ),
+    );
+  }
+
+  Widget _graphiqueCard({
+    required String titre,
+    required List<FlSpot> spots,
+    required Color couleur,
+    required String unite,
+  }) {
+    return Card(
+      child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  children: [
-                    const Text('Puissance (kW)',
-                        style: TextStyle(fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 16),
-                    SizedBox(
-                      height: 300,
-                      child: LineChart(
-                        LineChartData(
-                          lineBarsData: [
-                            LineChartBarData(
-                              spots: _getSpots('puissance_sortie'),
-                              isCurved: true,
-                              color: Colors.blue,
-                              barWidth: 3,
-                              dotData: const FlDotData(show: false),
-                            ),
-                          ],
-                          titlesData: FlTitlesData(
-                            bottomTitles: AxisTitles(
-                              sideTitles: SideTitles(
-                                showTitles: true,
-                                getTitlesWidget: (value, meta) {
-                                  return Text('${value.toInt()}h');
-                                },
-                              ),
-                            ),
-                            leftTitles: AxisTitles(
-                              sideTitles: SideTitles(
-                                showTitles: true,
-                                getTitlesWidget: (value, meta) {
-                                  return Text('${value.toInt()} kW');
-                                },
-                              ),
-                            ),
-                          ),
-                          gridData: const FlGridData(show: true),
-                          borderData: FlBorderData(show: true),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
+            Text(titre, style: const TextStyle(fontWeight: FontWeight.bold)),
             const SizedBox(height: 16),
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  children: [
-                    const Text('Courant (A)',
-                        style: TextStyle(fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 16),
-                    SizedBox(
-                      height: 300,
-                      child: LineChart(
-                        LineChartData(
-                          lineBarsData: [
-                            LineChartBarData(
-                              spots: _getSpots('courant_sortie'),
-                              isCurved: true,
-                              color: Colors.red,
-                              barWidth: 3,
-                            ),
-                          ],
-                          titlesData: FlTitlesData(
-                            bottomTitles: AxisTitles(
-                              sideTitles: SideTitles(
-                                showTitles: true,
-                                getTitlesWidget: (value, meta) =>
-                                    Text('${value.toInt()}h'),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
+            SizedBox(
+              height: 300,
+              child: LineChart(
+                LineChartData(
+                  lineBarsData: [
+                    LineChartBarData(
+                      spots: spots,
+                      isCurved: true,
+                      color: couleur,
+                      barWidth: 3,
+                      dotData: const FlDotData(show: false),
                     ),
                   ],
+                  titlesData: FlTitlesData(
+                    bottomTitles: AxisTitles(
+                      sideTitles: SideTitles(
+                        showTitles: true,
+                        getTitlesWidget: (value, meta) =>
+                            Text('${value.toInt()}h'),
+                      ),
+                    ),
+                    leftTitles: AxisTitles(
+                      sideTitles: SideTitles(
+                        showTitles: true,
+                        getTitlesWidget: (value, meta) =>
+                            Text('${value.toInt()} $unite'),
+                      ),
+                    ),
+                  ),
+                  gridData: const FlGridData(show: true),
+                  borderData: FlBorderData(show: true),
                 ),
               ),
             ),
