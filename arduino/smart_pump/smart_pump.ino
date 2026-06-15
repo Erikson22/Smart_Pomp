@@ -16,6 +16,10 @@
 #include <ArduinoJson.h>
 #include <time.h>
 
+// Credentials et certificat TLS dans un fichier séparé (non commité).
+// Copier config.h.example → config.h et remplir les valeurs.
+#include "config.h"
+
 // ==================== PINS ====================
 #define SIM808_TX_PIN  26
 #define SIM808_RX_PIN  27
@@ -30,19 +34,10 @@ TinyGPSPlus    gps;
 ModbusMaster   variateur;
 
 // ==================== CONFIGURATION ====================
-// WiFi
-const char* WIFI_SSID     = "SpiderHome";
-const char* WIFI_PASSWORD = "11111111";
+// WiFi/GPRS/Firebase : voir config.h (gitignored)
 
-// GPRS Ooredoo Tunisie
-const char* APN      = "internet.ooredoo.tn";
-const char* APN_USER = "";
-const char* APN_PASS = "";
-
-// Firebase
-const char* FIREBASE_HOST   = "solarpumpsupervision-b0c86-default-rtdb.europe-west1.firebasedatabase.app";
-const char* FIREBASE_SECRET = "";  // Vide si regles Firebase = public, sinon mettre le Database Secret
-const String FIREBASE_URL   = "https://solarpumpsupervision-b0c86-default-rtdb.europe-west1.firebasedatabase.app";
+// Firebase URL (construit depuis FIREBASE_HOST défini dans config.h)
+const String FIREBASE_URL = String("https://") + FIREBASE_HOST;
 
 // Proxy (pour GPRS sans SSL)
 const char* PROXY_HOST = "192.168.1.100";
@@ -352,7 +347,7 @@ bool envoyerDonnee(String chemin, String json) {
 
   if (modeActuel == CONNEXION_WIFI) {
     WiFiClientSecure client;
-    client.setInsecure();
+    client.setCACert(FIREBASE_ROOT_CA);  // Vérifie le certificat TLS Firebase
     HTTPClient http;
     http.begin(client, url);
     http.addHeader("Content-Type", "application/json");
@@ -371,7 +366,7 @@ String lireDonnee(String chemin) {
   String url = FIREBASE_URL + chemin + "?auth=" + FIREBASE_SECRET;
   if (modeActuel == CONNEXION_WIFI) {
     WiFiClientSecure client;
-    client.setInsecure();
+    client.setCACert(FIREBASE_ROOT_CA);  // Vérifie le certificat TLS Firebase
     HTTPClient http;
     http.begin(client, url);
     int code = http.GET();

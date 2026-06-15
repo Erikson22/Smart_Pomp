@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/material.dart';
@@ -21,28 +22,48 @@ class PompeService extends ChangeNotifier {
   Map<String, dynamic> gps     = {};
 
   bool   get enMarche  => etat['en_marche'] ?? false;
-  double get frequence => (etat['frequence'] ?? 0.0).toDouble();
+  double get frequence => _safeDouble(etat['frequence']);
 
   bool _alarmeWasActive = false;
 
+  // --- Gestion des abonnements ---
+  bool _listening = false;
+  StreamSubscription<DatabaseEvent>? _subMesures;
+  StreamSubscription<DatabaseEvent>? _subEtat;
+  StreamSubscription<DatabaseEvent>? _subAlarme;
+  StreamSubscription<DatabaseEvent>? _subGps;
+
+  /// Démarre les 4 listeners Firebase une seule fois (idempotent).
   void ecouterTout() {
-    _db.child('pompe/mesures').onValue.listen((e) {
-      mesures = Map<String, dynamic>.from(e.snapshot.value as Map? ?? {});
+    if (_listening) return;
+    _listening = true;
+
+    _subMesures = _db.child('pompe/mesures').onValue.listen((e) {
+      mesures = _toMap(e.snapshot.value);
       notifyListeners();
     });
-    _db.child('pompe/etat').onValue.listen((e) {
-      etat = Map<String, dynamic>.from(e.snapshot.value as Map? ?? {});
+    _subEtat = _db.child('pompe/etat').onValue.listen((e) {
+      etat = _toMap(e.snapshot.value);
       notifyListeners();
     });
-    _db.child('pompe/alarme').onValue.listen((e) {
-      alarme = Map<String, dynamic>.from(e.snapshot.value as Map? ?? {});
+    _subAlarme = _db.child('pompe/alarme').onValue.listen((e) {
+      alarme = _toMap(e.snapshot.value);
       _verifierAlarme();
       notifyListeners();
     });
-    _db.child('pompe/gps').onValue.listen((e) {
-      gps = Map<String, dynamic>.from(e.snapshot.value as Map? ?? {});
+    _subGps = _db.child('pompe/gps').onValue.listen((e) {
+      gps = _toMap(e.snapshot.value);
       notifyListeners();
     });
+  }
+
+  @override
+  void dispose() {
+    _subMesures?.cancel();
+    _subEtat?.cancel();
+    _subAlarme?.cancel();
+    _subGps?.cancel();
+    super.dispose();
   }
 
   void _verifierAlarme() {
@@ -55,25 +76,36 @@ class PompeService extends ChangeNotifier {
     _alarmeWasActive = active;
   }
 
+  // --- Helpers de parsing sûrs ---
+
+  /// Convertit une valeur Firebase en Map<String, dynamic> sans exception.
+  static Map<String, dynamic> _toMap(Object? value) =>
+      value is Map ? Map<String, dynamic>.from(value) : {};
+
+  /// Convertit int / double / String en double, retourne [fallback] si impossible.
+  static double _safeDouble(dynamic v, [double fallback = 0.0]) {
+    if (v == null)    return fallback;
+    if (v is double)  return v;
+    if (v is int)     return v.toDouble();
+    if (v is String)  return double.tryParse(v) ?? fallback;
+    return fallback;
+  }
+
   // --- Streams typés pour les autres écrans ---
   Stream<Alarme> get alarmeStream => _db.child('pompe/alarme').onValue.map(
-        (e) => Alarme.fromJson(
-            Map<String, dynamic>.from(e.snapshot.value as Map? ?? {})),
+        (e) => Alarme.fromJson(_toMap(e.snapshot.value)),
       );
 
   Stream<GPSData> get gpsStream => _db.child('pompe/gps').onValue.map(
-        (e) => GPSData.fromJson(
-            Map<String, dynamic>.from(e.snapshot.value as Map? ?? {})),
+        (e) => GPSData.fromJson(_toMap(e.snapshot.value)),
       );
 
   Stream<Mesure> get mesuresStream => _db.child('pompe/mesures').onValue.map(
-        (e) => Mesure.fromJson(
-            Map<String, dynamic>.from(e.snapshot.value as Map? ?? {})),
+        (e) => Mesure.fromJson(_toMap(e.snapshot.value)),
       );
 
   Stream<EtatPompe> get etatStream => _db.child('pompe/etat').onValue.map(
-        (e) => EtatPompe.fromJson(
-            Map<String, dynamic>.from(e.snapshot.value as Map? ?? {})),
+        (e) => EtatPompe.fromJson(_toMap(e.snapshot.value)),
       );
 
   // --- Commandes ---
@@ -85,10 +117,10 @@ class PompeService extends ChangeNotifier {
     });
   }
 
-  Future<void> demarrer()              => _envoyerCommande({'ordre': 'START'});
-  Future<void> arreter()               => _envoyerCommande({'ordre': 'STOP'});
-  Future<void> setFrequence(double f)  => _envoyerCommande({'ordre': 'SET_FREQ', 'frequence': f});
-  Future<void> resetVariateur()        => _envoyerCommande({'ordre': 'RESET_VARIATEUR'});
+  Future<void> demarrer()             => _envoyerCommande({'ordre': 'START'});
+  Future<void> arreter()              => _envoyerCommande({'ordre': 'STOP'});
+  Future<void> setFrequence(double f) => _envoyerCommande({'ordre': 'SET_FREQ', 'frequence': f});
+  Future<void> resetVariateur()       => _envoyerCommande({'ordre': 'RESET_VARIATEUR'});
 
   Future<void> startTimerRun(int heures, int minutes) => _envoyerCommande({
         'ordre': 'TIMER_RUN',
@@ -113,17 +145,11 @@ class PompeService extends ChangeNotifier {
   // --- Lectures ponctuelles ---
   Future<Map<String, dynamic>> getSeuils() async {
     final snapshot = await _db.child('pompe/seuils').get();
-    if (snapshot.exists) {
-      return Map<String, dynamic>.from(snapshot.value as Map);
-    }
-    return {};
+    return snapshot.exists ? _toMap(snapshot.value) : {};
   }
 
   Future<Map<String, dynamic>> getHistoriqueJour(String date) async {
     final snapshot = await _db.child('historique/$date').get();
-    if (snapshot.exists) {
-      return Map<String, dynamic>.from(snapshot.value as Map);
-    }
-    return {};
+    return snapshot.exists ? _toMap(snapshot.value) : {};
   }
 }

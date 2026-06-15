@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import '../models/etat.dart';
 
 class EtatPompeCard extends StatelessWidget {
@@ -6,6 +6,10 @@ class EtatPompeCard extends StatelessWidget {
   final VoidCallback onMarche;
   final VoidCallback onArret;
   final Function(double) onFrequenceChange;
+
+  // Plage alignée sur le firmware ESP32 (VEICHI SI23 : 0–300 Hz).
+  static const double _freqMin = 0.0;
+  static const double _freqMax = 300.0;
 
   const EtatPompeCard({
     super.key,
@@ -17,6 +21,9 @@ class EtatPompeCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Protège contre une valeur Firebase hors bornes qui ferait planter le Slider.
+    final double freqSafe = etat.frequence.clamp(_freqMin, _freqMax);
+
     return Card(
       elevation: 4,
       child: Padding(
@@ -38,15 +45,18 @@ class EtatPompeCard extends StatelessWidget {
           ]),
           const SizedBox(height: 16),
           Row(children: [
-            const Text('Frequence consigne : '),
+            const Text('Fréquence consigne : '),
             Expanded(
               child: Slider(
-                min: 0, max: 50, divisions: 100,
-                value: etat.frequence,
+                min: _freqMin,
+                max: _freqMax,
+                divisions: 60, // pas de 5 Hz
+                value: freqSafe,
+                label: '${freqSafe.toStringAsFixed(0)} Hz',
                 onChanged: onFrequenceChange,
               ),
             ),
-            Text('${etat.frequence.toStringAsFixed(1)} Hz'),
+            Text('${freqSafe.toStringAsFixed(1)} Hz'),
           ]),
           if (etat.timerActif)
             Padding(
@@ -59,7 +69,7 @@ class EtatPompeCard extends StatelessWidget {
             ),
           const SizedBox(height: 8),
           Text(
-            'Etat : ${etat.enMarche ? "EN MARCHE" : "ARRET"}',
+            'État : ${etat.enMarche ? "EN MARCHE" : "ARRÊT"}',
             style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
           ),
         ]),

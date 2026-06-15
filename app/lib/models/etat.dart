@@ -17,12 +17,28 @@ class EtatPompe {
 
   factory EtatPompe.fromJson(Map<String, dynamic> json) {
     return EtatPompe(
-      enMarche: json['en_marche'] ?? false,
-      frequence: (json['frequence'] ?? 0).toDouble(),
-      timerActif: json['timer_actif'] ?? false,
-      timerResteMinutes: json['timer_reste_minutes'] ?? 0,
-      timerMode: json['timer_mode'] ?? 'NONE',
-      timestamp: json['timestamp'] ?? '',
+      enMarche:           json['en_marche'] == true,
+      frequence:          _d(json['frequence']),
+      timerActif:         json['timer_actif'] == true,
+      timerResteMinutes:  _i(json['timer_reste_minutes']),
+      timerMode:          json['timer_mode']?.toString() ?? 'NONE',
+      timestamp:          json['timestamp']?.toString() ?? '',
     );
+  }
+
+  static double _d(dynamic v, [double fallback = 0.0]) {
+    if (v == null)   return fallback;
+    if (v is double) return v;
+    if (v is int)    return v.toDouble();
+    if (v is String) return double.tryParse(v) ?? fallback;
+    return fallback;
+  }
+
+  static int _i(dynamic v, [int fallback = 0]) {
+    if (v == null)   return fallback;
+    if (v is int)    return v;
+    if (v is double) return v.toInt();
+    if (v is String) return int.tryParse(v) ?? fallback;
+    return fallback;
   }
 }

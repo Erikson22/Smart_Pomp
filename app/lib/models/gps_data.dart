@@ -23,15 +23,23 @@ class GPSData {
 
   factory GPSData.fromJson(Map<String, dynamic> json) {
     return GPSData(
-      latitude: (json['latitude'] ?? 0).toDouble(),
-      longitude: (json['longitude'] ?? 0).toDouble(),
-      valide: json['valide'] ?? false,
-      operateur: json['operateur'] ?? 'Inconnu',
-      googleMaps: json['google_maps'] ?? '',
-      altitude: json['altitude']?.toDouble(),
-      vitesse: json['vitesse']?.toDouble(),
-      satellites: json['satellites'],
-      timestamp: json['timestamp'] ?? '',
+      latitude:   _d(json['latitude']),
+      longitude:  _d(json['longitude']),
+      valide:     json['valide'] == true,
+      operateur:  json['operateur']?.toString() ?? 'Inconnu',
+      googleMaps: json['google_maps']?.toString() ?? '',
+      altitude:   json['altitude'] != null ? _d(json['altitude']) : null,
+      vitesse:    json['vitesse']  != null ? _d(json['vitesse'])  : null,
+      satellites: json['satellites'] is int ? json['satellites'] as int : null,
+      timestamp:  json['timestamp']?.toString() ?? '',
     );
+  }
+
+  static double _d(dynamic v, [double fallback = 0.0]) {
+    if (v == null)   return fallback;
+    if (v is double) return v;
+    if (v is int)    return v.toDouble();
+    if (v is String) return double.tryParse(v) ?? fallback;
+    return fallback;
   }
 }

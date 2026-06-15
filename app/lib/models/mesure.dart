@@ -23,15 +23,24 @@ class Mesure {
 
   factory Mesure.fromJson(Map<String, dynamic> json) {
     return Mesure(
-      tensionPanneaux: (json['tension_panneaux'] ?? 0).toDouble(),
-      tensionBusDc: (json['tension_bus_dc'] ?? 0).toDouble(),
-      sortieTension: (json['sortie_tension'] ?? 0).toDouble(),
-      sortieCourant: (json['sortie_courant'] ?? 0).toDouble(),
-      sortieFrequence: (json['sortie_frequence'] ?? 0).toDouble(),
-      sortiePuissance: (json['sortie_puissance'] ?? 0).toDouble(),
-      entreeCourant: (json['entree_courant'] ?? 0).toDouble(),
-      entreePuissance: (json['entree_puissance'] ?? 0).toDouble(),
-      timestamp: json['timestamp'] ?? '',
+      tensionPanneaux:  _d(json['tension_panneaux']),
+      tensionBusDc:     _d(json['tension_bus_dc']),
+      sortieTension:    _d(json['sortie_tension']),
+      sortieCourant:    _d(json['sortie_courant']),
+      sortieFrequence:  _d(json['sortie_frequence']),
+      sortiePuissance:  _d(json['sortie_puissance']),
+      entreeCourant:    _d(json['entree_courant']),
+      entreePuissance:  _d(json['entree_puissance']),
+      timestamp: json['timestamp']?.toString() ?? '',
     );
+  }
+
+  /// Convertit int / double / String en double sans exception.
+  static double _d(dynamic v, [double fallback = 0.0]) {
+    if (v == null)   return fallback;
+    if (v is double) return v;
+    if (v is int)    return v.toDouble();
+    if (v is String) return double.tryParse(v) ?? fallback;
+    return fallback;
   }
 }

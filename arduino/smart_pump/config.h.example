@@ -1,0 +1,26 @@
+#pragma once
+
+// ============================================================
+//  MODÈLE DE CONFIGURATION – COPIER EN config.h ET REMPLIR
+//  config.h est dans .gitignore et ne sera jamais commité.
+// ============================================================
+
+// WiFi
+#define WIFI_SSID     "VotreSSID"
+#define WIFI_PASSWORD "VotreMotDePasse"
+
+// GPRS
+#define APN      "internet.ooredoo.tn"
+#define APN_USER ""
+#define APN_PASS ""
+
+// Firebase
+#define FIREBASE_HOST   "votre-projet.europe-west1.firebasedatabase.app"
+#define FIREBASE_SECRET ""
+
+// Certificat Firebase – voir config.h pour la valeur réelle
+static const char FIREBASE_ROOT_CA[] PROGMEM = R"EOF(
+-----BEGIN CERTIFICATE-----
+... (coller le certificat DigiCert Global Root G2) ...
+-----END CERTIFICATE-----
+)EOF";
