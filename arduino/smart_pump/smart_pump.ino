@@ -14,6 +14,8 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <WebServer.h>
+#include <Preferences.h>
 #include <time.h>
 
 // Credentials et certificat TLS dans un fichier séparé (non commité).
@@ -29,9 +31,11 @@
 // ==================== OBJETS ====================
 HardwareSerial SerialSIM(1);
 TinyGsm        modem(SerialSIM);
-TinyGsmClient  gsmClient(modem);
+TinyGsmClientSecure gsmClient(modem);  // SSL requis pour Firebase Functions (port 443)
 TinyGPSPlus    gps;
 ModbusMaster   variateur;
+WebServer      apServer(80);           // Portail de configuration WiFi (mode AP)
+Preferences    wifiPrefs;              // Stockage NVS des credentials WiFi
 
 // ==================== CONFIGURATION ====================
 // WiFi/GPRS/Firebase : voir config.h (gitignored)
@@ -39,9 +43,8 @@ ModbusMaster   variateur;
 // Firebase URL (construit depuis FIREBASE_HOST défini dans config.h)
 const String FIREBASE_URL = String("https://") + FIREBASE_HOST;
 
-// Proxy (pour GPRS sans SSL)
-const char* PROXY_HOST = "192.168.1.100";
-const int   PROXY_PORT = 5000;
+// Relay Cloud Function (GPRS → Firebase RTDB)
+// FIREBASE_HOST / FIREBASE_SECRET définis dans config.h (REST API directe, pas de relay)
 
 // ==================== MODES DE CONNEXION ====================
 enum ModeConnexion {
@@ -159,6 +162,12 @@ void traiterCommandeSerial(String cmd);
 void lireParametreConsole(String nomParam);
 void afficherMenuAide();
 void initialiserSIM808();
+// ── Mode Configuration AP ──
+void verifierBoutonConfig();
+void demarrerModeConfigAP();
+void handleRoot();
+void handleSave();
+void handleDelete();
 
 // ============================================================
 //                         SETUP
@@ -170,6 +179,9 @@ void setup() {
   Serial.println("\n╔══════════════════════════════════════════╗");
   Serial.println("║   SMART PUMP - VEICHI SI23 + Firebase   ║");
   Serial.println("╚══════════════════════════════════════════╝");
+
+  // Vérifier si le bouton BOOT est maintenu → mode Config AP (doit être en premier)
+  verifierBoutonConfig();
 
   // RS485 Modbus
   Serial2.begin(9600, SERIAL_8N1, RS485_RX_PIN, RS485_TX_PIN);
@@ -184,7 +196,7 @@ void setup() {
   // Connexion réseau
   connecter();
 
-  // Synchroniser l'heure NTP
+  // NTP disponible uniquement en WiFi (GPRS n'a pas de socket TCP libre pour NTP)
   if (modeActuel == CONNEXION_WIFI) {
     synchroniserHeure();
   }
@@ -257,15 +269,47 @@ void initialiserSIM808() {
 //                    GESTION CONNEXION
 // ============================================================
 void connecter() {
-  if (connecterWiFi()) { modeActuel = CONNEXION_WIFI; return; }
-  Serial.println("[NET] WiFi indisponible, tentative GPRS...");
+  // ── GPRS en priorité (connexion principale au boot) ──────
+#if USE_GPRS
   if (connecterGPRS()) { modeActuel = CONNEXION_GPRS; return; }
+  Serial.println("[NET] GPRS indisponible, tentative WiFi (fallback)...");
+#endif
+
+  // ── WiFi en fallback (optionnel) ─────────────────────────
+#if USE_WIFI
+  if (connecterWiFi()) { modeActuel = CONNEXION_WIFI; return; }
+#endif
+
   modeActuel = CONNEXION_AUCUNE;
   Serial.println("[NET] Aucune connexion disponible");
 }
 
 bool connecterWiFi() {
-  Serial.print("[WiFi] Connexion");
+  // ── 1. Réseaux sauvegardés en NVS (priorité) ─────────────
+  wifiPrefs.begin("wifi_cfg", true);
+  for (int i = 1; i <= 3; i++) {
+    String ssid = wifiPrefs.getString(("ssid" + String(i)).c_str(), "");
+    String pass = wifiPrefs.getString(("pass" + String(i)).c_str(), "");
+    if (ssid.isEmpty()) continue;
+
+    Serial.print("\n[WiFi] Essai NVS[" + String(i) + "] : " + ssid);
+    WiFi.begin(ssid.c_str(), pass.c_str());
+    for (int t = 0; t < 20; t++) {
+      if (WiFi.status() == WL_CONNECTED) {
+        wifiPrefs.end();
+        Serial.println("\n[WiFi] OK : " + WiFi.localIP().toString());
+        return true;
+      }
+      delay(500);
+      Serial.print(".");
+    }
+    WiFi.disconnect();
+    delay(200);
+  }
+  wifiPrefs.end();
+
+  // ── 2. Fallback : credentials config.h (dev / premier démarrage) ──
+  Serial.print("\n[WiFi] Fallback config.h : " WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   for (int i = 0; i < 20; i++) {
     if (WiFi.status() == WL_CONNECTED) {
@@ -290,11 +334,12 @@ bool connecterGPRS() {
 
 void verifierConnexion() {
   bool connecte = false;
-  if (modeActuel == CONNEXION_WIFI)  connecte = (WiFi.status() == WL_CONNECTED);
-  else if (modeActuel == CONNEXION_GPRS) connecte = modem.isGprsConnected();
+  if      (modeActuel == CONNEXION_GPRS) connecte = modem.isGprsConnected();
+  else if (modeActuel == CONNEXION_WIFI) connecte = (WiFi.status() == WL_CONNECTED);
   if (!connecte) {
     Serial.println("[NET] Connexion perdue, reconnexion...");
     connecter();
+    // NTP seulement si on est passé en fallback WiFi
     if (modeActuel == CONNEXION_WIFI) synchroniserHeure();
   }
 }
@@ -378,14 +423,25 @@ String lireDonnee(String chemin) {
   return "";
 }
 
-int envoyerViaGPRS(String methode, String chemin, String json) {
-  String req  = methode + " " + chemin + " HTTP/1.1\r\n";
-  req += "Host: " + String(PROXY_HOST) + "\r\n";
+int envoyerViaGPRS(String /* methode ignorée */, String chemin, String json) {
+  // SIM808 → Relay (Render/Fly.io) → Firebase RTDB
+  // Le relay gère TLS côté serveur ; SIM808 envoie HTTP ou HTTPS selon RELAY_PORT
+  String path = chemin;
+  if (path.endsWith(".json")) path = path.substring(0, path.length() - 5);
+
+  String body = "{\"path\":\"" + path + "\",\"data\":" + json + "}";
+  String req  = "POST " + String(RELAY_PATH) + " HTTP/1.1\r\n";
+  req += "Host: "           + String(RELAY_HOST)       + "\r\n";
   req += "Content-Type: application/json\r\n";
-  req += "Content-Length: " + String(json.length()) + "\r\n";
+  req += "Content-Length: " + String(body.length())    + "\r\n";
   req += "Connection: close\r\n\r\n";
-  req += json;
-  if (!gsmClient.connect(PROXY_HOST, PROXY_PORT)) return -1;
+  req += body;
+
+  Serial.println("[GPRS] Relay " + String(RELAY_HOST) + ":" + String(RELAY_PORT));
+  if (!gsmClient.connect(RELAY_HOST, RELAY_PORT)) {
+    Serial.println("[GPRS] Echec connexion relay (TLS ?) – essayer RELAY_PORT 80 si Render échoue");
+    return -1;
+  }
   gsmClient.print(req);
   unsigned long debut = millis();
   while (!gsmClient.available() && millis() - debut < 8000);
@@ -394,14 +450,24 @@ int envoyerViaGPRS(String methode, String chemin, String json) {
   gsmClient.stop();
   if (rep.indexOf("HTTP/1.1 200") != -1) return 200;
   if (rep.indexOf("HTTP/1.1 204") != -1) return 204;
+  int idx = rep.indexOf(' ');
+  if (idx != -1) Serial.println("[GPRS] Relay réponse: " + rep.substring(idx + 1, idx + 4));
   return -1;
 }
 
 String lireViaGPRS(String chemin) {
-  String req  = "GET " + chemin + " HTTP/1.1\r\n";
-  req += "Host: " + String(PROXY_HOST) + "\r\n";
+  // SIM808 → Relay (Render/Fly.io) → Firebase RTDB
+  String path = chemin;
+  if (path.endsWith(".json")) path = path.substring(0, path.length() - 5);
+
+  String req  = "GET " + String(RELAY_PATH) + "?path=" + path + " HTTP/1.1\r\n";
+  req += "Host: " + String(RELAY_HOST) + "\r\n";
   req += "Connection: close\r\n\r\n";
-  if (!gsmClient.connect(PROXY_HOST, PROXY_PORT)) return "";
+
+  if (!gsmClient.connect(RELAY_HOST, RELAY_PORT)) {
+    Serial.println("[GPRS] Echec connexion relay lecture");
+    return "";
+  }
   gsmClient.print(req);
   unsigned long debut = millis();
   while (!gsmClient.available() && millis() - debut < 8000);
@@ -456,7 +522,7 @@ void envoyerMesures() {
   derniereFreqSortie   = freqSortie;
   derniereTensSortie   = tensSortie;
 
-  StaticJsonDocument<512> doc;
+  JsonDocument doc;
   doc["tension_panneaux"] = tensPanneaux;
   doc["tension_bus_dc"]   = tensBusDC;
   doc["sortie_tension"]   = tensSortie;
@@ -470,7 +536,7 @@ void envoyerMesures() {
   serializeJson(doc, jsonMesures);
   envoyerDonnee("/pompe/mesures.json", jsonMesures);
 
-  StaticJsonDocument<256> docEtat;
+  JsonDocument docEtat;
   docEtat["en_marche"] = moteurEnMarche;
   docEtat["frequence"] = consigneFrequence;
   docEtat["timestamp"] = getTimestamp();
@@ -503,7 +569,7 @@ void sauvegarderHistoriqueHoraire(String date, String heure,
   if (heure == derniereHeure) return;
   derniereHeure = heure;
 
-  StaticJsonDocument<256> doc;
+  JsonDocument doc;
   doc["tension_panneaux"] = tens;
   doc["courant_sortie"]   = cour;
   doc["puissance_sortie"] = puis;
@@ -522,7 +588,7 @@ void lireCommandes() {
   String reponse = lireDonnee("/pompe/commande.json");
   if (reponse == "" || reponse == "null") return;
 
-  StaticJsonDocument<512> doc;
+  JsonDocument doc;
   if (deserializeJson(doc, reponse)) return;
 
   String statut = doc["statut"] | "IDLE";
@@ -569,7 +635,7 @@ void lireCommandes() {
 //                     ENVOYER GPS
 // ============================================================
 void envoyerGPS() {
-  StaticJsonDocument<256> doc;
+  JsonDocument doc;
 
   if (gps.location.isValid()) {
     doc["latitude"]    = gps.location.lat();
@@ -621,7 +687,7 @@ void demarrerMinuterie(int heures, int minutes, TimerMode mode) {
   else                   arreterMoteur();
   Serial.printf("[TIMER] %s : %dh%dmin\n", mode == TIMER_RUN ? "MARCHE" : "ARRET", heures, minutes);
 
-  StaticJsonDocument<128> doc;
+  JsonDocument doc;
   doc["actif"]         = true;
   doc["mode"]          = (mode == TIMER_RUN) ? "RUN" : "STOP";
   doc["duree_minutes"] = (heures * 60) + minutes;
@@ -634,7 +700,7 @@ void arreterMinuterie() {
   if (!minuterie.active) return;
   minuterie.active = false;
   Serial.println("[TIMER] Desactivee");
-  StaticJsonDocument<64> doc;
+  JsonDocument doc;
   doc["actif"] = false; doc["mode"] = "NONE";
   String json; serializeJson(doc, json);
   envoyerDonnee("/pompe/commande/timer.json", json);
@@ -646,7 +712,7 @@ void gererMinuterie() {
   minuterie.active = false;
   Serial.println("[TIMER] FIN");
   if (minuterie.mode == TIMER_RUN) arreterMoteur();
-  StaticJsonDocument<64> doc;
+  JsonDocument doc;
   doc["actif"] = false; doc["mode"] = "NONE";
   String json; serializeJson(doc, json);
   envoyerDonnee("/pompe/commande/timer.json", json);
@@ -695,7 +761,7 @@ void lireSeuilsProtection() {
   result = variateur.readHoldingRegisters((14 << 8) | 23, 1);
   if (result == variateur.ku8MBSuccess) seuilPuissMin  = variateur.getResponseBuffer(0) / 100.0;
 
-  StaticJsonDocument<256> doc;
+  JsonDocument doc;
   doc["veille"]       = seuilVeille;
   doc["reveil"]       = seuilReveil;
   doc["basse_freq"]   = seuilBasseFreq;
@@ -724,7 +790,7 @@ void diagnostiquerAvertissements(float tens, float freq, float cour, float puis)
     }
   } else if (avert == "" && dernierAvertissement != "") {
     dernierAvertissement = "";
-    StaticJsonDocument<128> doc;
+    JsonDocument doc;
     doc["active"] = false; doc["code"] = ""; doc["description"] = "";
     doc["cause"] = ""; doc["solution"] = ""; doc["timestamp"] = getTimestamp();
     String json; serializeJson(doc, json);
@@ -760,7 +826,7 @@ void lireEtatDefaut() {
       if (err != nullptr) {
         envoyerErreurFirebase(*err);
       } else {
-        StaticJsonDocument<256> doc;
+        JsonDocument doc;
         doc["active"] = true;
         doc["code"]   = "0x" + String(code, HEX);
         doc["description"] = "Code non repertorie";
@@ -773,7 +839,7 @@ void lireEtatDefaut() {
     }
   } else if (!defaut && dernierEtatDefaut == 1) {
     dernierEtatDefaut = 0;
-    StaticJsonDocument<128> doc;
+    JsonDocument doc;
     doc["active"] = false; doc["code"] = ""; doc["description"] = ""; doc["timestamp"] = getTimestamp();
     String json; serializeJson(doc, json);
     envoyerDonnee("/pompe/alarme.json", json);
@@ -784,7 +850,7 @@ void lireEtatDefaut() {
 //              ENVOYER ERREUR VERS FIREBASE
 // ============================================================
 void envoyerErreurFirebase(ErreurInfo err) {
-  StaticJsonDocument<512> doc;
+  JsonDocument doc;
   doc["active"]      = true;
   doc["code"]        = err.code;
   doc["description"] = err.description;
@@ -879,20 +945,232 @@ void lireParametreConsole(String nomParam) {
 //                     MENU AIDE
 // ============================================================
 void afficherMenuAide() {
-  Serial.println("\n╔══════════════════════════════════════════════════╗");
-  Serial.println("║              LISTE DES COMMANDES                 ║");
-  Serial.println("╠══════════════════════════════════════════════════╣");
-  Serial.println("║ START              - Demarrer le moteur          ║");
-  Serial.println("║ STOP               - Arreter le moteur           ║");
-  Serial.println("║ F=XX               - Regler frequence (Hz)       ║");
-  Serial.println("║ TIMER HH:MM START  - Marche puis arret auto      ║");
-  Serial.println("║ TIMER HH:MM STOP   - Arret sans redemarrage      ║");
-  Serial.println("║ TIMER OFF          - Annuler minuterie           ║");
-  Serial.println("║ READ               - Lire et envoyer mesures     ║");
-  Serial.println("║ GPS                - Envoyer position GPS        ║");
-  Serial.println("║ STATUS             - Etat du systeme             ║");
-  Serial.println("║ R Fxx.yy           - Lire parametre variateur    ║");
-  Serial.println("║ W Fxx.yy=Z         - Ecrire parametre variateur  ║");
-  Serial.println("║ HELP               - Afficher ce menu            ║");
-  Serial.println("╚══════════════════════════════════════════════════╝");
+  Serial.println("\n\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557");
+  Serial.println("\u2551              LISTE DES COMMANDES                 \u2551");
+  Serial.println("\u2560\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2563");
+  Serial.println("\u2551 START              - Demarrer le moteur          \u2551");
+  Serial.println("\u2551 STOP               - Arreter le moteur           \u2551");
+  Serial.println("\u2551 F=XX               - Regler frequence (Hz)       \u2551");
+  Serial.println("\u2551 TIMER HH:MM START  - Marche puis arret auto      \u2551");
+  Serial.println("\u2551 TIMER HH:MM STOP   - Arret sans redemarrage      \u2551");
+  Serial.println("\u2551 TIMER OFF          - Annuler minuterie           \u2551");
+  Serial.println("\u2551 READ               - Lire et envoyer mesures     \u2551");
+  Serial.println("\u2551 GPS                - Envoyer position GPS        \u2551");
+  Serial.println("\u2551 STATUS             - Etat du systeme             \u2551");
+  Serial.println("\u2551 R Fxx.yy           - Lire parametre variateur    \u2551");
+  Serial.println("\u2551 W Fxx.yy=Z         - Ecrire parametre variateur  \u2551");
+  Serial.println("\u2551 HELP               - Afficher ce menu            \u2551");
+  Serial.println("\u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d");
+}
+
+void verifierBoutonConfig() {
+  pinMode(WIFI_CONFIG_BUTTON_PIN, INPUT_PULLUP);
+  if (digitalRead(WIFI_CONFIG_BUTTON_PIN) != LOW) return;
+
+  Serial.print("[CONFIG] Bouton BOOT - maintenir 3s pour mode AP");
+  for (int i = 0; i < 30; i++) {
+    delay(100);
+    if (digitalRead(WIFI_CONFIG_BUTTON_PIN) != LOW) {
+      Serial.println("\n[CONFIG] Relache - boot normal");
+      return;
+    }
+    if (i % 5 == 4) Serial.print(".");
+  }
+  Serial.println("\n[CONFIG] Mode AP active !");
+  demarrerModeConfigAP();
+  Serial.println("[CONFIG] Timeout 5min - redemarrage");
+  ESP.restart();
+}
+
+// ── Page principale GET / ─────────────────────────────────────
+void handleRoot() {
+  int n = WiFi.scanNetworks();
+
+  String pg;
+  pg.reserve(3500);
+
+  pg = "<!DOCTYPE html><html lang=fr><head>"
+       "<meta charset=UTF-8>"
+       "<meta name=viewport content='width=device-width,initial-scale=1'>"
+       "<title>Smart Pump Config</title><style>"
+       "*{box-sizing:border-box;margin:0;padding:0}"
+       "body{background:#0d1117;color:#c9d1d9;font:15px Arial,sans-serif;"
+         "padding:16px;max-width:460px;margin:auto}"
+       "h1{color:#1d9e75;text-align:center;padding:10px 0 20px;font-size:1.3em}"
+       "h2{color:#8b949e;font-size:.78em;text-transform:uppercase;"
+         "letter-spacing:.05em;margin:14px 0 8px}"
+       ".c{background:#161b22;border:1px solid #30363d;border-radius:10px;"
+         "padding:16px;margin-bottom:14px}"
+       "label{display:block;margin:10px 0 4px;font-size:.85em;color:#8b949e}"
+       "input,select{width:100%;padding:10px;background:#0d1117;color:#c9d1d9;"
+         "border:1px solid #30363d;border-radius:6px;font-size:.95em}"
+       ".g{display:block;width:100%;padding:12px;background:#1d9e75;color:#fff;"
+         "border:none;border-radius:6px;font-size:1em;cursor:pointer;"
+         "margin-top:12px;font-weight:700}"
+       ".g:hover{background:#17876a}"
+       ".r{background:#b91c1c!important;padding:7px 12px;margin-top:0}"
+       ".r:hover{background:#991b1b!important}"
+       ".row{display:flex;gap:8px;align-items:center;margin-bottom:6px}"
+       ".row span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+       "footer{color:#8b949e;font-size:.75em;text-align:center;margin-top:8px}"
+       "</style></head><body>"
+       "<h1>&#9889; Smart Pump &#8212; Config WiFi</h1>";
+
+  // Reseaux sauvegardes
+  pg += "<div class=c><h2>R&#233;seaux sauvegard&#233;s</h2>";
+  wifiPrefs.begin("wifi_cfg", true);
+  bool any = false;
+  for (int i = 1; i <= 3; i++) {
+    String s = wifiPrefs.getString(("ssid" + String(i)).c_str(), "");
+    if (!s.isEmpty()) {
+      any = true;
+      pg += "<div class=row><span>&#128246; " + s + "</span>"
+            "<form action=/delete method=get style=margin:0>"
+            "<input type=hidden name=slot value=" + String(i) + ">"
+            "<button class='g r'>&#10005;</button></form></div>";
+    }
+  }
+  wifiPrefs.end();
+  if (!any)
+    pg += "<p style='color:#8b949e;font-size:.85em'>Aucun r&#233;seau sauvegard&#233;</p>";
+  pg += "</div>";
+
+  // Ajouter un reseau
+  pg += "<div class=c><h2>Ajouter un r&#233;seau</h2>";
+  if (n > 0) {
+    pg += "<label>R&#233;seaux d&#233;tect&#233;s</label>"
+          "<select onchange=\"document.getElementById('sid').value=this.value\">"
+          "<option value=''>-- choisir ou saisir --</option>";
+    for (int i = 0; i < n; i++) {
+      pg += "<option value='" + WiFi.SSID(i) + "'>"
+            + WiFi.SSID(i) + " (" + String(WiFi.RSSI(i)) + " dBm)</option>";
+    }
+    pg += "</select>";
+  }
+  pg += "<form action=/save method=post>"
+        "<label>SSID</label>"
+        "<input type=text name=ssid id=sid required placeholder='Nom du r&#233;seau'>"
+        "<label>Mot de passe</label>"
+        "<input type=password name=pass placeholder='Mot de passe'>"
+        "<button type=submit class=g>&#10003; Tester &amp; Sauvegarder</button>"
+        "</form></div>"
+        "<footer>Timeout 5 min &#8211; red&#233;marrage auto</footer>"
+        "</body></html>";
+
+  apServer.send(200, "text/html; charset=utf-8", pg);
+  WiFi.scanDelete();
+}
+
+// ── POST /save : tester + stocker en NVS ─────────────────────
+void handleSave() {
+  String ssid = apServer.arg("ssid");
+  String pass = apServer.arg("pass");
+
+  if (ssid.isEmpty()) {
+    apServer.send(400, "text/plain", "SSID manquant");
+    return;
+  }
+
+  // Test connexion (AP reste actif en WIFI_AP_STA)
+  WiFi.begin(ssid.c_str(), pass.c_str());
+  bool ok = false;
+  for (int i = 0; i < 20 && !ok; i++) {
+    delay(500);
+    ok = (WiFi.status() == WL_CONNECTED);
+  }
+  WiFi.disconnect();   // STA seulement, AP reste vivant
+
+  String pg;
+  pg.reserve(900);
+  pg = "<!DOCTYPE html><html lang=fr><head>"
+       "<meta charset=UTF-8>"
+       "<meta name=viewport content='width=device-width,initial-scale=1'>"
+       "<title>Smart Pump Config</title><style>"
+       "body{background:#0d1117;color:#c9d1d9;font:15px Arial,sans-serif;"
+         "padding:20px;max-width:460px;margin:auto;text-align:center}"
+       "h1{color:#1d9e75;padding:10px 0 20px;font-size:1.3em}"
+       ".c{background:#161b22;border:1px solid #30363d;border-radius:10px;"
+         "padding:24px;margin:20px 0}"
+       ".ico{font-size:3.5em;margin:10px 0}"
+       "p{margin-top:10px}"
+       "a{color:#58a6ff;display:block;margin-top:18px;text-decoration:none}"
+       "</style></head><body>"
+       "<h1>&#9889; Smart Pump &#8212; Config WiFi</h1><div class=c>";
+
+  if (ok) {
+    wifiPrefs.begin("wifi_cfg", false);
+    int slot = -1;
+    for (int i = 1; i <= 3; i++) {
+      String ex = wifiPrefs.getString(("ssid" + String(i)).c_str(), "");
+      if (ex == ssid)                { slot = i; break; }
+      if (slot < 0 && ex.isEmpty()) { slot = i; }
+    }
+    if (slot < 0) slot = 1;
+    wifiPrefs.putString(("ssid" + String(slot)).c_str(), ssid);
+    wifiPrefs.putString(("pass" + String(slot)).c_str(), pass);
+    wifiPrefs.end();
+
+    Serial.println("[AP] Sauvegarde : " + ssid + " -> slot " + String(slot));
+    pg += "<div class=ico>&#9989;</div>"
+          "<p style='color:#1d9e75;font-weight:700;font-size:1.1em'>"
+          "Connexion r&#233;ussie !</p>"
+          "<p>" + ssid + " sauvegard&#233; (slot " + String(slot) + ")</p>";
+  } else {
+    Serial.println("[AP] Echec : " + ssid);
+    pg += "<div class=ico>&#10060;</div>"
+          "<p style='color:#b91c1c;font-weight:700;font-size:1.1em'>"
+          "Connexion &#233;chou&#233;e</p>"
+          "<p>V&#233;rifier SSID et mot de passe</p>";
+  }
+
+  pg += "<a href=/>&#8592; Retour</a></div></body></html>";
+  apServer.send(200, "text/html; charset=utf-8", pg);
+}
+
+// ── GET /delete?slot=N ────────────────────────────────────────
+void handleDelete() {
+  int slot = apServer.arg("slot").toInt();
+  if (slot >= 1 && slot <= 3) {
+    wifiPrefs.begin("wifi_cfg", false);
+    wifiPrefs.remove(("ssid" + String(slot)).c_str());
+    wifiPrefs.remove(("pass" + String(slot)).c_str());
+    wifiPrefs.end();
+    Serial.println("[AP] Supprime slot " + String(slot));
+  }
+  apServer.sendHeader("Location", "/");
+  apServer.send(302, "text/plain", "Redirect");
+}
+
+// ── Boucle AP + WebServer (5 min) ────────────────────────────
+void demarrerModeConfigAP() {
+  WiFi.mode(WIFI_AP_STA);  // AP + STA simultanes : permet scan et test
+
+  IPAddress apIP;
+  apIP.fromString(AP_IP);
+  WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
+
+  Serial.println("[AP] Mode Config AP actif");
+  Serial.println("[AP] SSID     : " AP_SSID);
+  Serial.println("[AP] Password : " AP_PASSWORD);
+  Serial.println("[AP] IP       : " AP_IP);
+  Serial.println("[AP] Timeout  : 5 minutes");
+
+  apServer.on("/",       HTTP_GET,  handleRoot);
+  apServer.on("/save",   HTTP_POST, handleSave);
+  apServer.on("/delete", HTTP_GET,  handleDelete);
+  apServer.begin();
+  Serial.println("[AP] Connectez-vous a " AP_SSID " puis ouvrez http://" AP_IP);
+
+  const unsigned long TIMEOUT_AP = 5UL * 60UL * 1000UL;
+  unsigned long t0 = millis();
+
+  while (millis() - t0 < TIMEOUT_AP) {
+    apServer.handleClient();
+    delay(2);
+  }
+
+  apServer.stop();
+  WiFi.softAPdisconnect(true);
+  Serial.println("[AP] Portail ferme (timeout 5 min)");
 }

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_database/firebase_database.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../models/alarme.dart';
 import '../models/etat.dart';
@@ -21,6 +22,9 @@ class PompeService extends ChangeNotifier {
   Map<String, dynamic> alarme  = {};
   Map<String, dynamic> gps     = {};
 
+  /// Horodatage local de la dernière réception de mesures (pour indicateur fraîcheur).
+  DateTime? lastUpdate;
+
   bool   get enMarche  => etat['en_marche'] ?? false;
   double get frequence => _safeDouble(etat['frequence']);
 
@@ -39,20 +43,45 @@ class PompeService extends ChangeNotifier {
     _listening = true;
 
     _subMesures = _db.child('pompe/mesures').onValue.listen((e) {
-      mesures = _toMap(e.snapshot.value);
+      mesures    = _toMap(e.snapshot.value);
+      lastUpdate = DateTime.now();
+      debugPrint('[Firebase][mesures] '
+          'tension=${mesures["sortie_tension"]} V  '
+          'courant=${mesures["sortie_courant"]} A  '
+          'freq=${mesures["sortie_frequence"]} Hz  '
+          'puis=${mesures["sortie_puissance"]} kW  '
+          'panneaux=${mesures["tension_panneaux"]} V  '
+          'ts=${mesures["timestamp"]}');
       notifyListeners();
     });
+
     _subEtat = _db.child('pompe/etat').onValue.listen((e) {
       etat = _toMap(e.snapshot.value);
+      debugPrint('[Firebase][etat] '
+          'enMarche=${etat["en_marche"]}  '
+          'freq=${etat["frequence"]} Hz  '
+          'timer=${etat["timer_actif"]}  '
+          'ts=${etat["timestamp"]}');
       notifyListeners();
     });
+
     _subAlarme = _db.child('pompe/alarme').onValue.listen((e) {
       alarme = _toMap(e.snapshot.value);
+      debugPrint('[Firebase][alarme] '
+          'active=${alarme["active"]}  '
+          'code=${alarme["code"]}  '
+          'desc=${alarme["description"]}');
       _verifierAlarme();
       notifyListeners();
     });
+
     _subGps = _db.child('pompe/gps').onValue.listen((e) {
       gps = _toMap(e.snapshot.value);
+      debugPrint('[Firebase][gps] '
+          'lat=${gps["latitude"]}  '
+          'lng=${gps["longitude"]}  '
+          'valide=${gps["valide"]}  '
+          'op=${gps["operateur"]}');
       notifyListeners();
     });
   }
@@ -84,12 +113,24 @@ class PompeService extends ChangeNotifier {
 
   /// Convertit int / double / String en double, retourne [fallback] si impossible.
   static double _safeDouble(dynamic v, [double fallback = 0.0]) {
-    if (v == null)    return fallback;
-    if (v is double)  return v;
-    if (v is int)     return v.toDouble();
-    if (v is String)  return double.tryParse(v) ?? fallback;
+    if (v == null)   return fallback;
+    if (v is double) return v;
+    if (v is int)    return v.toDouble();
+    if (v is String) return double.tryParse(v) ?? fallback;
     return fallback;
   }
+
+  /// Convertit int / double / String en int, retourne [fallback] si impossible.
+  static int _safeInt(dynamic v, [int fallback = 0]) {
+    if (v == null)   return fallback;
+    if (v is int)    return v;
+    if (v is double) return v.toInt();
+    if (v is String) return int.tryParse(v) ?? fallback;
+    return fallback;
+  }
+
+  /// Accès sûr à timer_reste_minutes depuis la map etat brute.
+  int get timerResteMinutes => _safeInt(etat['timer_reste_minutes']);
 
   // --- Streams typés pour les autres écrans ---
   Stream<Alarme> get alarmeStream => _db.child('pompe/alarme').onValue.map(

@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: smart-pump-relay
+    runtime: node
+    rootDir: functions
+    buildCommand: ""          # aucune dépendance npm, zéro build
+    startCommand: node server.js
+    plan: free
+
+    # Variables d'environnement – remplir dans le dashboard Render
+    # OU décommenter et mettre les valeurs directement (déconseillé pour le secret)
+    envVars:
+      - key: FIREBASE_HOST
+        value: smartpumpmonitor-default-rtdb.europe-west1.firebasedatabase.app
+      - key: FIREBASE_SECRET
+        sync: false           # Render demandera la valeur dans son UI (non commité)
+      - key: NODE_ENV
+        value: production

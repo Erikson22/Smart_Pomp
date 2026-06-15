@@ -44,8 +44,16 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
-# Credentials Arduino – NE PAS COMMITTER
+# Credentials – NE PAS COMMITTER
 arduino/smart_pump/config.h
+app/android/app/google-services.json
+functions/.env
+.env
+
+# PlatformIO
+**/.pio/
+**/.pioenvs/
+**/.piolibdeps/
 
 # Fichiers Flutter generes a la racine (flutter run depuis mauvais dossier)
 /android/

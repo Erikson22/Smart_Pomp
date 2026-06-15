@@ -1,6 +1,7 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:provider/provider.dart';
+import 'package:flutter/services.dart';
 import 'firebase_options.dart';
 import 'services/pompe_service.dart';
 import 'utils/notifications.dart';
@@ -106,11 +107,107 @@ class _AppLoaderState extends State<AppLoader> {
         title: 'Smart Pump',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
-          colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1D9E75)),
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: const Color(0xFF1D9E75),
+            brightness: Brightness.light,
+          ),
           useMaterial3: true,
+          scaffoldBackgroundColor: const Color(0xFFF3F7F4),
+          appBarTheme: const AppBarTheme(
+            centerTitle: true,
+            elevation: 0,
+            scrolledUnderElevation: 0,
+            backgroundColor: Color(0xFFF3F7F4),
+            foregroundColor: Color(0xFF17231F),
+            titleTextStyle: TextStyle(
+              color: Color(0xFF17231F),
+              fontSize: 18,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          cardTheme: CardThemeData(
+            elevation: 0,
+            color: Colors.white,
+            margin: EdgeInsets.zero,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.all(Radius.circular(16)),
+              side: BorderSide(color: Color(0xFFE5ECE8)),
+            ),
+          ),
+          filledButtonTheme: FilledButtonThemeData(
+            style: FilledButton.styleFrom(
+              minimumSize: const Size.fromHeight(48),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+              ),
+            ),
+          ),
+          outlinedButtonTheme: OutlinedButtonThemeData(
+            style: OutlinedButton.styleFrom(
+              minimumSize: const Size.fromHeight(46),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+              ),
+            ),
+          ),
+          inputDecorationTheme: InputDecorationTheme(
+            filled: true,
+            fillColor: Colors.white,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(14),
+              borderSide: const BorderSide(color: Color(0xFFDDE7E1)),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(14),
+              borderSide: const BorderSide(color: Color(0xFFDDE7E1)),
+            ),
+          ),
+        ),
+        builder: (context, child) => OrientationGate(
+          child: child ?? const SizedBox.shrink(),
         ),
         routerConfig: appRouter,
       ),
     );
+  }
+}
+
+class OrientationGate extends StatefulWidget {
+  final Widget child;
+
+  const OrientationGate({super.key, required this.child});
+
+  @override
+  State<OrientationGate> createState() => _OrientationGateState();
+}
+
+class _OrientationGateState extends State<OrientationGate> {
+  bool? _lockedPortrait;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _applyOrientationPolicy();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return widget.child;
+  }
+
+  void _applyOrientationPolicy() {
+    final shortestSide = MediaQuery.sizeOf(context).shortestSide;
+    final shouldLockPortrait = shortestSide < 600;
+
+    if (_lockedPortrait == shouldLockPortrait) return;
+    _lockedPortrait = shouldLockPortrait;
+
+    if (shouldLockPortrait) {
+      SystemChrome.setPreferredOrientations(const [
+        DeviceOrientation.portraitUp,
+      ]);
+    } else {
+      SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+    }
   }
 }

@@ -1,0 +1,14 @@
+{
+  "name": "smart-pump-relay",
+  "version": "1.0.0",
+  "description": "Relay HTTP SIM808 → Firebase Realtime Database (Render / Fly.io)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev":   "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "private": true
+}

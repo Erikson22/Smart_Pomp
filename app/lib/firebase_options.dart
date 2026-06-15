@@ -17,6 +17,6 @@ class DefaultFirebaseOptions {
     messagingSenderId: '862442978495',
     projectId: 'solarpumpsupervision-b0c86',
     storageBucket: 'solarpumpsupervision-b0c86.firebasestorage.app',
-    databaseURL: 'https://solarpumpsupervision-b0c86-default-rtdb.europe-west1.firebasedatabase.app',
+    databaseURL: 'https://smartpumpmonitor-default-rtdb.europe-west1.firebasedatabase.app',
   );
 }

@@ -25,6 +25,7 @@ class LocalisationScreen extends StatelessWidget {
           }
           return Column(
             children: [
+              // Carte occupe 3/4 de l'écran
               Expanded(
                 flex: 3,
                 child: FlutterMap(
@@ -34,7 +35,8 @@ class LocalisationScreen extends StatelessWidget {
                   ),
                   children: [
                     TileLayer(
-                      urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                      urlTemplate:
+                          'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
                       userAgentPackageName: 'com.example.smartpumpmonitor',
                     ),
                     MarkerLayer(
@@ -51,47 +53,52 @@ class LocalisationScreen extends StatelessWidget {
                   ],
                 ),
               ),
+
+              // Panneau info : flex:1 ≈ 130–180 px selon l'appareil.
+              // SingleChildScrollView évite tout overflow si l'espace est
+              // plus petit que prévu (petit écran ou barre système haute).
               Expanded(
                 flex: 1,
                 child: Card(
-                  margin: const EdgeInsets.all(12),
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
+                  margin: const EdgeInsets.fromLTRB(8, 6, 8, 8),
+                  child: SingleChildScrollView(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     child: Column(
-                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        ListTile(
-                          leading: const Icon(Icons.sim_card),
-                          title: const Text('Opérateur SIM'),
-                          subtitle: Text(gps.operateur),
+                        _infoRow(Icons.sim_card, 'Opérateur', gps.operateur),
+                        _infoRow(Icons.satellite, 'Satellites',
+                            '${gps.satellites ?? 0}'),
+                        _infoRow(
+                          Icons.location_on,
+                          'Coordonnées',
+                          '${gps.latitude.toStringAsFixed(5)}°,'
+                              ' ${gps.longitude.toStringAsFixed(5)}°',
                         ),
-                        ListTile(
-                          leading: const Icon(Icons.satellite),
-                          title: const Text('Satellites'),
-                          subtitle: Text('${gps.satellites ?? 0}'),
-                        ),
-                        ListTile(
-                          leading: const Icon(Icons.location_on),
-                          title: const Text('Coordonnées GPS'),
-                          subtitle: Text(
-                              '${gps.latitude.toStringAsFixed(6)}°, ${gps.longitude.toStringAsFixed(6)}°'),
-                        ),
-                        ElevatedButton.icon(
-                          onPressed: () async {
-                            final uri = Uri.parse(gps.googleMaps);
-                            if (await canLaunchUrl(uri)) {
-                              await launchUrl(uri,
-                                  mode: LaunchMode.externalApplication);
-                            } else if (context.mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                    content:
-                                        Text('Impossible d\'ouvrir Google Maps')),
-                              );
-                            }
-                          },
-                          icon: const Icon(Icons.map),
-                          label: const Text('Ouvrir dans Google Maps'),
+                        const SizedBox(height: 6),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                                visualDensity: VisualDensity.compact),
+                            onPressed: () async {
+                              final uri = Uri.parse(gps.googleMaps);
+                              if (await canLaunchUrl(uri)) {
+                                await launchUrl(uri,
+                                    mode: LaunchMode.externalApplication);
+                              } else if (context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                      content: Text(
+                                          'Impossible d\'ouvrir Google Maps')),
+                                );
+                              }
+                            },
+                            icon: const Icon(Icons.map, size: 16),
+                            label: const Text('Ouvrir dans Google Maps'),
+                          ),
                         ),
                       ],
                     ),
@@ -101,6 +108,27 @@ class LocalisationScreen extends StatelessWidget {
             ],
           );
         },
+      ),
+    );
+  }
+
+  /// Ligne d'info compacte (≈ 24 px de hauteur) pour remplacer ListTile (≈ 56 px).
+  Widget _infoRow(IconData icon, String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: Colors.grey.shade600),
+          const SizedBox(width: 8),
+          Text('$label : ',
+              style: const TextStyle(
+                  fontSize: 12, fontWeight: FontWeight.w600)),
+          Expanded(
+            child: Text(value,
+                style: const TextStyle(fontSize: 12),
+                overflow: TextOverflow.ellipsis),
+          ),
+        ],
       ),
     );
   }

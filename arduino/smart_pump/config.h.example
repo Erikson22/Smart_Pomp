@@ -5,7 +5,20 @@
 //  config.h est dans .gitignore et ne sera jamais commité.
 // ============================================================
 
-// WiFi
+// ── Mode Configuration WiFi (Access Point) ──────────────────
+#define WIFI_CONFIG_BUTTON_PIN  0        // Bouton BOOT existant sur ESP32
+#define AP_SSID                 "SmartPump-Config"
+#define AP_PASSWORD             "smartpump123"
+#define AP_IP                   "192.168.4.1"
+
+// ── Stratégie de connexion ───────────────────────────────────
+// USE_GPRS true  → SIM808/GPRS est la connexion principale (boot)
+// USE_WIFI true  → WiFi utilisé en fallback si GPRS échoue
+// Mettre USE_WIFI false pour désactiver complètement le WiFi.
+#define USE_GPRS true
+#define USE_WIFI true    // fallback uniquement (essayé après GPRS)
+
+// WiFi (fallback – ignoré si USE_WIFI false)
 #define WIFI_SSID     "VotreSSID"
 #define WIFI_PASSWORD "VotreMotDePasse"
 
@@ -14,9 +27,14 @@
 #define APN_USER ""
 #define APN_PASS ""
 
-// Firebase
-#define FIREBASE_HOST   "votre-projet.europe-west1.firebasedatabase.app"
-#define FIREBASE_SECRET ""
+// Firebase Realtime Database (connexion GPRS directe via REST API + TLS)
+// Plan Spark (gratuit) compatible – aucun Firebase Functions requis
+#define FIREBASE_HOST   "votre-projet-default-rtdb.europe-west1.firebasedatabase.app"
+#define FIREBASE_PORT   443
+
+// Database Secret pour l'auth des requêtes GPRS (REST API legacy auth)
+// Console Firebase → Paramètres du projet → Comptes de service → Database Secret (onglet)
+#define FIREBASE_SECRET "VotreDatabaseSecret"
 
 // Certificat Firebase – voir config.h pour la valeur réelle
 static const char FIREBASE_ROOT_CA[] PROGMEM = R"EOF(

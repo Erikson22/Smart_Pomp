@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'screens/dashboard.dart';
+import 'screens/commandes.dart';
 import 'screens/graphiques.dart';
 import 'screens/alarmes.dart';
 import 'screens/parametres.dart';
@@ -14,6 +15,7 @@ final appRouter = GoRouter(
       builder: (context, state, child) => MainShell(child: child),
       routes: [
         GoRoute(path: '/dashboard',    builder: (_, __) => const DashboardScreen()),
+        GoRoute(path: '/commandes',    builder: (_, __) => const CommandesScreen()),
         GoRoute(path: '/graphiques',   builder: (_, __) => const GraphiquesScreen()),
         GoRoute(path: '/alarmes',      builder: (_, __) => const AlarmesScreen()),
         GoRoute(path: '/localisation', builder: (_, __) => const LocalisationScreen()),
@@ -30,10 +32,9 @@ class MainShell extends StatelessWidget {
 
   static const _tabs = [
     '/dashboard',
+    '/commandes',
     '/graphiques',
-    '/alarmes',
     '/localisation',
-    '/parametres',
     '/ia',
   ];
 
@@ -44,6 +45,11 @@ class MainShell extends StatelessWidget {
     return Scaffold(
       body: child,
       bottomNavigationBar: NavigationBar(
+        height: 68,
+        elevation: 0,
+        backgroundColor: Colors.white,
+        indicatorColor: const Color(0xFFE1F3EC),
+        labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
         selectedIndex: index < 0 ? 0 : index,
         onDestinationSelected: (i) => context.go(_tabs[i]),
         destinations: const [
@@ -52,21 +58,17 @@ class MainShell extends StatelessWidget {
               selectedIcon: Icon(Icons.home),
               label: 'Accueil'),
           NavigationDestination(
+              icon: Icon(Icons.tune_outlined),
+              selectedIcon: Icon(Icons.tune),
+              label: 'Cmd'),
+          NavigationDestination(
               icon: Icon(Icons.bar_chart_outlined),
               selectedIcon: Icon(Icons.bar_chart),
               label: 'Graphiques'),
           NavigationDestination(
-              icon: Icon(Icons.notifications_outlined),
-              selectedIcon: Icon(Icons.notifications),
-              label: 'Alarmes'),
-          NavigationDestination(
               icon: Icon(Icons.location_on_outlined),
               selectedIcon: Icon(Icons.location_on),
               label: 'GPS'),
-          NavigationDestination(
-              icon: Icon(Icons.settings_outlined),
-              selectedIcon: Icon(Icons.settings),
-              label: 'Paramètres'),
           NavigationDestination(
               icon: Icon(Icons.psychology_outlined),
               selectedIcon: Icon(Icons.psychology),
